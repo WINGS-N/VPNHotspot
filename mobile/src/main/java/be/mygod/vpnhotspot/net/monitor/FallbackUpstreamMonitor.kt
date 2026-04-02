@@ -19,6 +19,7 @@ abstract class FallbackUpstreamMonitor private constructor() : UpstreamMonitor()
         }
         private var monitor = generateMonitor()
         val currentNetwork get() = monitor.currentNetwork
+        val currentLinkProperties get() = monitor.currentLinkProperties
 
         fun registerCallback(callback: Callback) = synchronized(this) { monitor.registerCallback(callback) }
         fun unregisterCallback(callback: Callback) = synchronized(this) { monitor.unregisterCallback(callback) }

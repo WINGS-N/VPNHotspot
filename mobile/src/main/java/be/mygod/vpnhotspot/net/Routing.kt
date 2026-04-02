@@ -9,6 +9,7 @@ import be.mygod.vpnhotspot.R
 import be.mygod.vpnhotspot.net.dns.DnsForwarder
 import be.mygod.vpnhotspot.net.monitor.FallbackUpstreamMonitor
 import be.mygod.vpnhotspot.net.monitor.IpNeighbourMonitor
+import be.mygod.vpnhotspot.net.monitor.TetherClientsMonitor
 import be.mygod.vpnhotspot.net.monitor.TrafficRecorder
 import be.mygod.vpnhotspot.net.monitor.UpstreamMonitor
 import be.mygod.vpnhotspot.net.monitor.VpnMonitor
@@ -32,8 +33,11 @@ import java.net.SocketException
  *
  * Once revert is called, this object no longer serves any purpose.
  */
-class Routing(private val caller: Any, private val downstream: String) : IpNeighbourMonitor.Callback {
+class Routing(private val caller: Any, private val downstream: String) : IpNeighbourMonitor.Callback,
+    TetherClientsMonitor.Callback {
     companion object {
+        private const val KEY_SYNTHETIC_ROOT_UPSTREAM = "service.upstream.syntheticRoot"
+
         /**
          * Since Android 5.0, RULE_PRIORITY_TETHERING = 18000.
          * This also works for Wi-Fi direct where there's no rule at 18000.
@@ -42,14 +46,45 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
          *
          * Source: https://android.googlesource.com/platform/system/netd/+/b9baf26/server/RouteController.cpp#65
          */
-        private const val RULE_PRIORITY_UPSTREAM = 17800
-        private const val RULE_PRIORITY_UPSTREAM_FALLBACK = 17900
-        private const val RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM = 17980
+        private data class RulePrioritySet(
+            val returnDownstream: Int?,
+            val upstream: Int,
+            val fallback: Int,
+            val disableSystem: Int,
+        )
+
+        private val DEFAULT_RULE_PRIORITIES = RulePrioritySet(
+            returnDownstream = null,
+            upstream = 17800,
+            fallback = 17900,
+            disableSystem = 17980,
+        )
+
+        /**
+         * Some Samsung/OEM stacks route tethered packets through vendor policy tables before the
+         * standard tethering priority range is reached. In that case 17800/17900 is too late and
+         * packets keep following the physical upstream (for example wlan0 table 54000) instead of
+         * the synthetic root WireGuard interface. For synthetic root upstreams we install the same
+         * rules earlier, before the OEM 12000 range.
+         */
+        private val SYNTHETIC_ROOT_RULE_PRIORITIES = RulePrioritySet(
+            returnDownstream = 11890,
+            upstream = 11900,
+            fallback = 11950,
+            disableSystem = 11980,
+        )
 
         private const val ROOT_DIR = "/system/bin/"
         const val IP = "${ROOT_DIR}ip"
         const val IPTABLES = "iptables -w"
         const val IP6TABLES = "ip6tables -w"
+
+        private fun activeRulePriorities(): RulePrioritySet =
+            if (app.pref.getBoolean(KEY_SYNTHETIC_ROOT_UPSTREAM, false)) {
+                SYNTHETIC_ROOT_RULE_PRIORITIES
+            } else {
+                DEFAULT_RULE_PRIORITIES
+            }
 
         fun appendCleanCommands(commands: BufferedWriter) {
             commands.appendLine("$IPTABLES -t nat -F PREROUTING")
@@ -66,9 +101,14 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
             commands.appendLine("while $IP6TABLES -D OUTPUT -j vpnhotspot_filter; do done")
             commands.appendLine("$IP6TABLES -F vpnhotspot_filter")
             commands.appendLine("$IP6TABLES -X vpnhotspot_filter")
-            commands.appendLine("while $IP rule del priority $RULE_PRIORITY_UPSTREAM; do done")
-            commands.appendLine("while $IP rule del priority $RULE_PRIORITY_UPSTREAM_FALLBACK; do done")
-            commands.appendLine("while $IP rule del priority $RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM; do done")
+            for (priorities in listOf(DEFAULT_RULE_PRIORITIES, SYNTHETIC_ROOT_RULE_PRIORITIES)) {
+                priorities.returnDownstream?.let {
+                    commands.appendLine("while $IP rule del priority $it; do done")
+                }
+                commands.appendLine("while $IP rule del priority ${priorities.upstream}; do done")
+                commands.appendLine("while $IP rule del priority ${priorities.fallback}; do done")
+                commands.appendLine("while $IP rule del priority ${priorities.disableSystem}; do done")
+            }
         }
 
         suspend fun clean() {
@@ -103,17 +143,27 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
                 } == e.result.err.trim()
     }
 
-    private fun RootSession.Transaction.ipRule(action: String, priority: Int, rule: String = "") {
+    private fun RootSession.Transaction.ipRule(
+        action: String,
+        priority: Int,
+        rule: String = "",
+        incomingInterface: String = downstream,
+    ) {
         try {
-            exec("$IP rule add $rule iif $downstream $action priority $priority",
-                    "$IP rule del $rule iif $downstream $action priority $priority")
+            exec("$IP rule add $rule iif $incomingInterface $action priority $priority",
+                    "$IP rule del $rule iif $incomingInterface $action priority $priority")
         } catch (e: RoutingCommands.UnexpectedOutputException) {
             if (!shouldSuppressIpError(e)) throw e
         }
     }
-    private fun RootSession.Transaction.ipRuleLookup(ifindex: Int, priority: Int, rule: String = "") =
+    private fun RootSession.Transaction.ipRuleLookup(
+        ifindex: Int,
+        priority: Int,
+        rule: String = "",
+        incomingInterface: String = downstream,
+    ) =
             // https://android.googlesource.com/platform/system/netd/+/android-5.0.0_r1/server/RouteController.h#37
-            ipRule("lookup ${1000 + ifindex}", priority, rule)
+            ipRule("lookup ${1000 + ifindex}", priority, rule, incomingInterface)
 
     enum class MasqueradeMode {
         None,
@@ -139,11 +189,15 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
         throw InterfaceNotFoundException(e)
     }
     private val hostSubnet = "${hostAddress.address.hostAddress}/${hostAddress.networkPrefixLength}"
+    private val downstreamIfindex = Os.if_nametoindex(downstream).also {
+        if (it <= 0) throw InterfaceNotFoundException(SocketException("if_nametoindex($downstream) failed"))
+    }
     lateinit var transaction: RootSession.Transaction
 
     @Volatile
     private var stopped = false
     private var masqueradeMode = MasqueradeMode.None
+    private val rulePriorities = activeRulePriorities()
 
     private val upstreams = HashSet<String>()
     private class InterfaceGoneException(upstream: String) : IOException("Interface $upstream not found")
@@ -153,6 +207,11 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
                 if (it <= 0) throw InterfaceGoneException(upstream)
             }
             val transaction = RootSession.beginTransaction().safeguard {
+                if (priority == rulePriorities.upstream) {
+                    rulePriorities.returnDownstream?.let {
+                        ipRuleLookup(downstreamIfindex, it, "to $hostSubnet", upstream)
+                    }
+                }
                 ipRuleLookup(ifindex, priority)
                 when (masqueradeMode) {
                     MasqueradeMode.None -> { }  // nothing to be done here
@@ -190,8 +249,8 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
             }
         }
     }
-    private val fallbackUpstream = Upstream(RULE_PRIORITY_UPSTREAM_FALLBACK)
-    private val upstream = Upstream(RULE_PRIORITY_UPSTREAM)
+    private val fallbackUpstream = Upstream(rulePriorities.fallback)
+    private val upstream = Upstream(rulePriorities.upstream)
     private val emptyCallback = object : UpstreamMonitor.Callback { }
 
     private inner class Client(private val ip: Inet4Address, mac: MacAddress) : AutoCloseable {
@@ -216,24 +275,54 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
         }
     }
     private val clients = mutableMapOf<InetAddress, Client>()
+    private var latestNeighbours: Collection<IpNeighbour> = emptyList()
+    private var latestTetherClients: Collection<TetherClientsMonitor.ClientInfo> = emptyList()
+
     override fun onIpNeighbourAvailable(neighbours: Collection<IpNeighbour>) = synchronized(this) {
         if (stopped) return
-        val toRemove = HashSet(clients.keys)
-        for (neighbour in neighbours) {
+        latestNeighbours = neighbours
+        refreshClientsLocked()
+    }
+
+    override fun onClientsChanged(clients: Collection<TetherClientsMonitor.ClientInfo>) = synchronized(this) {
+        if (stopped) return
+        latestTetherClients = clients
+        refreshClientsLocked()
+    }
+
+    private fun refreshClientsLocked() {
+        val desired = LinkedHashMap<InetAddress, MacAddress>()
+        val downstreamType = TetherType.ofInterface(downstream)
+        for (neighbour in latestNeighbours) {
             if (neighbour.dev != downstream || neighbour.ip !is Inet4Address ||
                     AppDatabase.instance.clientRecordDao.lookupOrDefaultBlocking(neighbour.lladdr).blocked) continue
-            toRemove.remove(neighbour.ip)
+            desired[neighbour.ip] = neighbour.lladdr
+        }
+        for (client in latestTetherClients) {
+            if (!downstreamType.isA(client.fallbackType) ||
+                    AppDatabase.instance.clientRecordDao.lookupOrDefaultBlocking(client.macAddress).blocked) continue
+            for (address in client.addresses) {
+                val inetAddress = address.address
+                if (inetAddress is Inet4Address) {
+                    desired.putIfAbsent(inetAddress, client.macAddress)
+                }
+            }
+        }
+        val toRemove = HashSet(clients.keys)
+        for ((address, macAddress) in desired) {
+            toRemove.remove(address)
             try {
-                clients.computeIfAbsent(neighbour.ip) { Client(neighbour.ip, neighbour.lladdr) }
+                clients.computeIfAbsent(address) { Client(address as Inet4Address, macAddress) }
             } catch (e: Exception) {
                 Timber.w(e)
                 SmartSnackbar.make(e).show()
             }
         }
         if (toRemove.isNotEmpty()) {
-            TrafficRecorder.update()    // record stats before removing rules to prevent stats losing
-            for (address in toRemove) clients.remove(address)!!.close()
+            TrafficRecorder.update()
+            for (address in toRemove) clients.remove(address)?.close()
         }
+        Timber.i("Routing $downstream ACL clients: active=${clients.size}, neigh=${latestNeighbours.size}, tether=${latestTetherClients.size}")
     }
 
     /**
@@ -288,6 +377,7 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
     fun stop() {
         synchronized(this) { stopped = true }
         IpNeighbourMonitor.unregisterCallback(this)
+        TetherClientsMonitor.unregisterCallback(this)
         DnsForwarder.unregisterClient(this)
         FallbackUpstreamMonitor.unregisterCallback(fallbackUpstream)
         UpstreamMonitor.unregisterCallback(upstream)
@@ -307,7 +397,7 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
     }
 
     fun commit() {
-        transaction.ipRule("unreachable", RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM)
+        transaction.ipRule("unreachable", rulePriorities.disableSystem)
         val useLocalnet = Os.uname().release.split('.', limit = 3).let { version ->
             val major = version[0].toInt()
             // https://github.com/torvalds/linux/commit/d0daebc3d622f95db181601cb0c4a0781f74f758
@@ -327,6 +417,7 @@ class Routing(private val caller: Any, private val downstream: String) : IpNeigh
         FallbackUpstreamMonitor.registerCallback(fallbackUpstream)
         UpstreamMonitor.registerCallback(upstream)
         IpNeighbourMonitor.registerCallback(this, true)
+        TetherClientsMonitor.registerCallback(this)
         if (VpnFirewallManager.mayBeAffected) VpnMonitor.registerCallback(emptyCallback)
     }
     fun revert() {

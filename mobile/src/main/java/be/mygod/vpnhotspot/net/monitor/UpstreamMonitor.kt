@@ -21,6 +21,7 @@ abstract class UpstreamMonitor {
         }
         private var monitor = generateMonitor()
         val currentNetwork get() = monitor.currentNetwork
+        val currentLinkProperties get() = monitor.currentLinkProperties
 
         fun registerCallback(callback: Callback) = synchronized(this) { monitor.registerCallback(callback) }
         fun unregisterCallback(callback: Callback) = synchronized(this) { monitor.unregisterCallback(callback) }
@@ -53,7 +54,7 @@ abstract class UpstreamMonitor {
     val callbacks = mutableSetOf<Callback>()
     var currentNetwork: Network? = null
         protected set
-    protected abstract val currentLinkProperties: LinkProperties?
+    abstract val currentLinkProperties: LinkProperties?
     protected abstract fun registerCallbackLocked(callback: Callback)
     abstract fun destroyLocked()
 

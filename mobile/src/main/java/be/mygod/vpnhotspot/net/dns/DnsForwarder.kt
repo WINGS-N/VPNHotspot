@@ -1,5 +1,6 @@
 package be.mygod.vpnhotspot.net.dns
 
+import be.mygod.vpnhotspot.App.Companion.app
 import be.mygod.vpnhotspot.net.monitor.FallbackUpstreamMonitor
 import be.mygod.vpnhotspot.net.monitor.UpstreamMonitor
 import io.ktor.network.selector.SelectorManager
@@ -34,6 +35,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.io.readByteArray
 import org.xbill.DNS.Message
 import org.xbill.DNS.Rcode
+import org.xbill.DNS.SimpleResolver
 import timber.log.Timber
 import java.io.IOException
 import java.nio.channels.ClosedChannelException
@@ -43,6 +45,7 @@ import java.nio.channels.ClosedChannelException
  */
 class DnsForwarder : CoroutineScope {
     companion object {
+        private const val KEY_ROOT_DNS = "service.upstream.rootDns"
         private var instance: DnsForwarder? = null
 
         private val clients = mutableSetOf<Any>()
@@ -161,8 +164,15 @@ class DnsForwarder : CoroutineScope {
     }
 
     private suspend fun resolve(query: ByteArray, source: () -> String) = try {
-        DnsResolverCompat.resolveRaw(UpstreamMonitor.currentNetwork ?: FallbackUpstreamMonitor.currentNetwork ?:
-            throw IOException("no upstream available"), query)
+        val upstreamNetwork = UpstreamMonitor.currentNetwork
+        if (upstreamNetwork != null) {
+            DnsResolverCompat.resolveRaw(upstreamNetwork, query)
+        } else if (UpstreamMonitor.currentLinkProperties != null) {
+            resolveRawViaConfiguredDns(query)
+        } else {
+            DnsResolverCompat.resolveRaw(FallbackUpstreamMonitor.currentNetwork ?:
+                throw IOException("no upstream available"), query)
+        }
     } catch (e: Exception) {
         when (e) {
             is CancellationException -> { }
@@ -176,6 +186,25 @@ class DnsForwarder : CoroutineScope {
         } catch (e: IOException) {
             Timber.d("Malformed ${source()}", e)
             null    // return empty if cannot parse packet
+        }
+    }
+
+    private suspend fun resolveRawViaConfiguredDns(query: ByteArray): ByteArray {
+        val servers = app.pref.getString(KEY_ROOT_DNS, null)
+            ?.split(',')
+            ?.mapNotNull { it.trim().takeUnless(String::isEmpty) }
+            .orEmpty()
+        if (servers.isEmpty()) throw IOException("no configured root dns servers")
+        return kotlinx.coroutines.withContext(Dispatchers.IO) {
+            var lastError: IOException? = null
+            for (server in servers) {
+                try {
+                    return@withContext SimpleResolver(server).send(Message(query)).toWire()
+                } catch (e: IOException) {
+                    lastError = e
+                }
+            }
+            throw lastError ?: IOException("dns resolution failed")
         }
     }
 }
