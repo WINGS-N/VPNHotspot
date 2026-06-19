@@ -48,10 +48,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class Routing(private val caller: Any, private val downstream: String) {
     companion object {
-        // WINGS-N fork. Prefs used by the synthetic-root-tunnel mode where
+        // WINGS-N fork. Prefs used by the synthetic-root-tunnel mode where the
         // upstream is a WireGuard interface that is not registered with
-        // ConnectivityManager. See vpnhotspotd::routing::active_priority_set
-        // and vpnhotspotd::dns::query_explicit_dns.
+        // ConnectivityManager. See vpnhotspotd routing.rs active_priority_set
+        // and dns.rs query_explicit_dns.
         private const val KEY_SYNTHETIC_ROOT_UPSTREAM = "service.upstream.syntheticRoot"
         private const val KEY_ROOT_DNS = "service.upstream.rootDns"
 

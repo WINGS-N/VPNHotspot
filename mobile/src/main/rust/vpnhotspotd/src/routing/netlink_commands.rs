@@ -68,6 +68,11 @@ pub(super) struct IpRuleCommand {
     pub(super) table: u32,
     pub(super) fwmark: Option<(u32, u32)>,
     pub(super) ip_protocol: Option<IpProtocol>,
+    // WINGS-N fork. Optional address plus prefix length used as the rule
+    // destination match (the equivalent of "to a.b.c.d/24" in ip rule).
+    // Set by synthetic-root return rules to steer the reply path back into
+    // the downstream table.
+    pub(super) destination: Option<(IpAddr, u8)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -146,6 +151,7 @@ pub(super) async fn delete_rule_repeated(
                 table: 0,
                 fwmark: None,
                 ip_protocol: None,
+                destination: None,
             },
         )
         .await;
@@ -349,7 +355,7 @@ fn fill_rule_message(message: &mut RuleMessage, command: &IpRuleCommand) -> io::
         netlink::validate_interface_name(&command.iif)?;
     }
     message.header.family = family_value(command.family);
-    message.header.dst_len = 0;
+    message.header.dst_len = command.destination.map_or(0, |(_, prefix_len)| prefix_len);
     message.header.src_len = 0;
     message.header.tos = 0;
     message.header.table = if command.table < 256 {
@@ -380,6 +386,11 @@ fn fill_rule_message(message: &mut RuleMessage, command: &IpRuleCommand) -> io::
     }
     if let Some(protocol) = command.ip_protocol {
         message.attributes.push(RuleAttribute::IpProtocol(protocol));
+    }
+    if let Some((address, _)) = command.destination {
+        message
+            .attributes
+            .push(RuleAttribute::Destination(address.into()));
     }
     Ok(())
 }

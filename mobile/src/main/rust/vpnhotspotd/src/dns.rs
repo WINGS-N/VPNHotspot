@@ -512,11 +512,11 @@ async fn resolve_query_accounted(
         return query_network(fallback, query).await;
     }
     // WINGS-N fork. Synthetic root WireGuard tunnels are not registered with
-    // ConnectivityManager so primary_network/fallback_network stay None even
-    // when the device has working upstream connectivity. Fall back to a static
-    // list of DNS servers and forward over plain UDP. Routing of these packets
-    // is left to the kernel routing table picked by the daemon's own routing
-    // rules, which on a working session is the synthetic root tunnel.
+    // ConnectivityManager, so primary_network and fallback_network stay None
+    // even when the device has working upstream connectivity. Fall back to a
+    // static list of DNS servers and forward over plain UDP. Routing of these
+    // packets is left to the kernel routing table picked by the daemon rules,
+    // which on a working session is the synthetic root tunnel.
     if !config.fallback_dns_servers.is_empty() {
         return query_explicit_dns(&config.fallback_dns_servers, query).await;
     }

@@ -39,14 +39,12 @@ const RULE_PRIORITY_UPSTREAM_BASE: u32 = 20700;
 const RULE_PRIORITY_UPSTREAM_FALLBACK_BASE: u32 = 20800;
 const RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM_BASE: u32 = 20900;
 
-// WINGS-N fork. Mirror of the upstream priority set but moved into the
-// OEM-vendor priority range so packets are matched before Samsung One UI
-// vendor policy rules (table 54000) on the way out. Used when
-// SessionConfig::use_synthetic_root_priorities is set.
-//
-// After rule_priority_for_api(api < 31) the effective values become
-// 11890 / 11900 / 11950 / 11980, matching the original WINGS-N app-side
-// patch on master.
+// WINGS-N fork. Mirror of the upstream priority set but placed inside the
+// OEM-vendor range so packets are matched before Samsung One UI vendor policy
+// rules (table 54000) on the way out. Enabled by SessionConfig
+// use_synthetic_root_priorities. After rule_priority_for_api on API <31 these
+// collapse to 11890 / 11900 / 11950 / 11980, matching the original WINGS-N
+// app-side patch on master.
 const RULE_PRIORITY_SYNTHETIC_RETURN_DOWNSTREAM_BASE: u32 = 14890;
 const RULE_PRIORITY_SYNTHETIC_UPSTREAM_BASE: u32 = 14900;
 const RULE_PRIORITY_SYNTHETIC_UPSTREAM_FALLBACK_BASE: u32 = 14950;
@@ -323,7 +321,7 @@ pub(crate) async fn clean(
         rule_priority(RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM_BASE),
     )
     .await?;
-    // WINGS-N fork. Clean the synthetic-root priority range too so a session
+    // WINGS-N fork. Drop the synthetic-root priority range too so a session
     // that used use_synthetic_root_priorities does not leak rules across a
     // restart that toggles the flag back off.
     for base in [

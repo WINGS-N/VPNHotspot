@@ -55,14 +55,14 @@ message SessionConfig {
   repeated string fallback_upstream_interfaces = 9;
   repeated ClientConfig clients = 10;
   optional Ipv6NatConfig ipv6_nat = 11;
-  // WINGS-N fork: install upstream rules in the OEM-vendor priority range so
+  // WINGS-N fork. Install upstream rules in the OEM-vendor priority range so
   // tethered packets reach the synthetic root WireGuard interface even on
-  // Samsung One UI, where stock priority 17700/17800/17900 is shadowed by
-  // vendor policy table (e.g. 12000-14000). See routing.rs synthetic priority
-  // base constants.
+  // Samsung One UI, where the stock 17700/17800/17900 set is shadowed by
+  // vendor policy table 54000. See routing.rs synthetic priority constants.
   bool use_synthetic_root_priorities = 12;
-  // WINGS-N fork: explicit DNS servers used by the daemon when neither
-  // primary_network nor fallback_network is set (synthetic root tunnel case).
+  // WINGS-N fork. Explicit DNS servers used by the daemon when neither
+  // primary_network nor fallback_network is set, i.e. the synthetic root
+  // tunnel case where the upstream is not registered with ConnectivityManager.
   repeated string fallback_dns_servers = 13;
 }
 

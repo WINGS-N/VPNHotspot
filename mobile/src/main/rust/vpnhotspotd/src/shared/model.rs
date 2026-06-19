@@ -106,15 +106,14 @@ pub struct SessionConfig {
     pub fallback_upstream_interfaces: Vec<String>,
     pub clients: Vec<ClientConfig>,
     pub ipv6_nat: Option<Ipv6NatConfig>,
-    // WINGS-N fork. Install upstream/return rules in the OEM-vendor priority
-    // range (11890..11980 on API <31, 14890..14980 on API >=31) so packets
-    // hit the synthetic root WireGuard interface even when the OEM stack
-    // already routed them at 12000 (Samsung One UI table 54000 case).
+    // WINGS-N fork. Pick the synthetic-root priority set (11890..11980 on
+    // API <31, 14890..14980 on API >=31) so we slide under the OEM vendor
+    // table that shadows the normal 17700..17900 range on Samsung One UI.
     pub use_synthetic_root_priorities: bool,
-    // WINGS-N fork. Explicit DNS servers used by the daemon DNS forwarder
-    // when neither primary_network nor fallback_network is set; needed when
-    // the only upstream is a synthetic root WireGuard interface that is not
-    // exposed to ConnectivityManager and therefore has no Network handle.
+    // WINGS-N fork. Explicit DNS servers consulted by the daemon DNS
+    // forwarder when neither primary_network nor fallback_network is set,
+    // i.e. the only upstream is a synthetic root WireGuard interface that
+    // is not exposed to ConnectivityManager and therefore has no Network id.
     pub fallback_dns_servers: Vec<String>,
 }
 

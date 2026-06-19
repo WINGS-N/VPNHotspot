@@ -188,5 +188,6 @@ fn probe_command(ip_protocol: Option<IpProtocol>) -> IpRuleCommand {
         table: DAEMON_TABLE,
         fwmark: None,
         ip_protocol,
+        destination: None,
     }
 }

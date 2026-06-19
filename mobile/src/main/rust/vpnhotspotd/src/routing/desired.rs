@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use cidr::Ipv4Inet;
+use cidr::{Ipv4Cidr, Ipv4Inet};
 use rtnetlink::packet_route::IpProtocol;
 
 use crate::{firewall::IptablesTarget, netlink, report};
@@ -70,6 +70,7 @@ impl Runtime {
                 table: 0,
                 fwmark: None,
                 ip_protocol: None,
+                destination: None,
             })),
         );
         for chain in ["vpnhotspot_acl", "vpnhotspot_stats"] {
@@ -141,8 +142,48 @@ impl Runtime {
                         table: 1000 + ifindex,
                         fwmark: None,
                         ip_protocol: None,
+                        destination: None,
                     })),
                 );
+                // WINGS-N fork. Reply path: when synthetic-root priorities are
+                // active the upstream is a root WireGuard tunnel and tether
+                // reply traffic from the upstream interface needs an explicit
+                // lookup to the downstream route table, otherwise Samsung One
+                // UI vendor rules steal it back to the physical link.
+                if let Some(priority) = priorities
+                    .return_downstream
+                    .filter(|_| matches!(upstream.role, UpstreamRole::Primary))
+                {
+                    if let Some(host_subnet) = host_subnet_cidr(self.downstream_ipv4) {
+                        let downstream_ifindex =
+                            netlink::link_index(&self.netlink, &config.downstream).await;
+                        match downstream_ifindex {
+                            Ok(downstream_ifindex) => push_unique(
+                                &mut mutations,
+                                RoutingMutation::Ip(IpCommand::Rule(IpRuleCommand {
+                                    operation: IpOperation::Replace,
+                                    family: IpFamily::Ipv4,
+                                    iif: ifname.clone(),
+                                    priority,
+                                    action: RuleAction::Lookup,
+                                    table: 1000 + downstream_ifindex,
+                                    fwmark: None,
+                                    ip_protocol: None,
+                                    destination: Some((
+                                        IpAddr::V4(host_subnet.first_address()),
+                                        host_subnet.network_length(),
+                                    )),
+                                })),
+                            ),
+                            Err(e) if netlink::is_missing_link(&e) => {}
+                            Err(e) => report::io_with_details(
+                                "routing.resolve_downstream_index",
+                                e,
+                                [("downstream", config.downstream.as_str())],
+                            ),
+                        }
+                    }
+                }
                 match config.masquerade {
                     MasqueradeMode::None => {}
                     MasqueradeMode::Simple => push_unique(
@@ -246,6 +287,7 @@ impl Runtime {
                                     table: DAEMON_TABLE,
                                     fwmark: None,
                                     ip_protocol: Some(protocol),
+                                    destination: None,
                                 })),
                             );
                         }
@@ -262,6 +304,7 @@ impl Runtime {
                         table: DAEMON_TABLE,
                         fwmark: Some((DAEMON_INTERCEPT_FWMARK_VALUE, DAEMON_INTERCEPT_FWMARK_MASK)),
                         ip_protocol: None,
+                        destination: None,
                     })),
                 ),
             }
@@ -788,4 +831,10 @@ fn host_subnet(downstream_ipv4: DownstreamIpv4) -> String {
     let subnet = Ipv4Inet::new(downstream_ipv4.address, downstream_ipv4.prefix_len)
         .expect("downstream IPv4 prefix length must be <= 32");
     format!("{}/{}", subnet.first_address(), subnet.network_length())
+}
+
+fn host_subnet_cidr(downstream_ipv4: DownstreamIpv4) -> Option<Ipv4Cidr> {
+    Ipv4Inet::new(downstream_ipv4.address, downstream_ipv4.prefix_len)
+        .ok()
+        .map(|inet| inet.network())
 }
