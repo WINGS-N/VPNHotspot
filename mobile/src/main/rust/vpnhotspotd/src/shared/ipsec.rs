@@ -470,6 +470,8 @@ mUserResourceTracker:
                 .collect(),
             clients: Vec::new(),
             ipv6_nat: None,
+            use_synthetic_root_priorities: false,
+            fallback_dns_servers: Vec::new(),
         }
     }
 

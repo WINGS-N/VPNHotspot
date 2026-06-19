@@ -48,6 +48,13 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class Routing(private val caller: Any, private val downstream: String) {
     companion object {
+        // WINGS-N fork. Prefs used by the synthetic-root-tunnel mode where
+        // upstream is a WireGuard interface that is not registered with
+        // ConnectivityManager. See vpnhotspotd::routing::active_priority_set
+        // and vpnhotspotd::dns::query_explicit_dns.
+        private const val KEY_SYNTHETIC_ROOT_UPSTREAM = "service.upstream.syntheticRoot"
+        private const val KEY_ROOT_DNS = "service.upstream.rootDns"
+
         private val ipv6NatPrefixSeed: String
             @SuppressLint("HardwareIds")
             get() = "${app.packageName}\u0000${
@@ -332,6 +339,11 @@ class Routing(private val caller: Any, private val downstream: String) {
                 }
             },
             ipv6_nat = if (ipv6Mode == Ipv6Mode.Nat) Ipv6NatConfig(ipv6NatPrefixSeed) else null,
+            use_synthetic_root_priorities = app.pref.getBoolean(KEY_SYNTHETIC_ROOT_UPSTREAM, false),
+            fallback_dns_servers = app.pref.getString(KEY_ROOT_DNS, null)
+                ?.split(',')
+                ?.mapNotNull { it.trim().takeUnless(String::isEmpty) }
+                .orEmpty(),
         )
     }
 

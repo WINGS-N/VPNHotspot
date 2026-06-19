@@ -21,9 +21,8 @@ use super::netlink_commands::{
     RuleAction,
 };
 use super::{
-    push_unique, rule_priority, RoutingMutation, Runtime, RULE_PRIORITY_DAEMON_BASE,
-    RULE_PRIORITY_UPSTREAM_BASE, RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM_BASE,
-    RULE_PRIORITY_UPSTREAM_FALLBACK_BASE,
+    active_priority_set, push_unique, rule_priority, RoutingMutation, Runtime,
+    RULE_PRIORITY_DAEMON_BASE,
 };
 
 impl Runtime {
@@ -32,6 +31,7 @@ impl Runtime {
         config: &SessionConfig,
     ) -> Vec<RoutingMutation> {
         let mut mutations = Vec::new();
+        let priorities = active_priority_set(config.use_synthetic_root_priorities);
         if config.ip_forward {
             push_unique(
                 &mut mutations,
@@ -65,7 +65,7 @@ impl Runtime {
                 operation: IpOperation::Replace,
                 family: IpFamily::Ipv4,
                 iif: config.downstream.clone(),
-                priority: rule_priority(RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM_BASE),
+                priority: priorities.disable_system,
                 action: RuleAction::Unreachable,
                 table: 0,
                 fwmark: None,
@@ -132,10 +132,10 @@ impl Runtime {
                         operation: IpOperation::Replace,
                         family: IpFamily::Ipv4,
                         iif: config.downstream.clone(),
-                        priority: rule_priority(match upstream.role {
-                            UpstreamRole::Primary => RULE_PRIORITY_UPSTREAM_BASE,
-                            UpstreamRole::Fallback => RULE_PRIORITY_UPSTREAM_FALLBACK_BASE,
-                        }),
+                        priority: match upstream.role {
+                            UpstreamRole::Primary => priorities.upstream,
+                            UpstreamRole::Fallback => priorities.fallback,
+                        },
                         action: RuleAction::Lookup,
                         // https://android.googlesource.com/platform/system/netd/+/android-5.0.0_r1/server/RouteController.h#37
                         table: 1000 + ifindex,

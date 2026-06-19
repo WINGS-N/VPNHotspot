@@ -39,6 +39,47 @@ const RULE_PRIORITY_UPSTREAM_BASE: u32 = 20700;
 const RULE_PRIORITY_UPSTREAM_FALLBACK_BASE: u32 = 20800;
 const RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM_BASE: u32 = 20900;
 
+// WINGS-N fork. Mirror of the upstream priority set but moved into the
+// OEM-vendor priority range so packets are matched before Samsung One UI
+// vendor policy rules (table 54000) on the way out. Used when
+// SessionConfig::use_synthetic_root_priorities is set.
+//
+// After rule_priority_for_api(api < 31) the effective values become
+// 11890 / 11900 / 11950 / 11980, matching the original WINGS-N app-side
+// patch on master.
+const RULE_PRIORITY_SYNTHETIC_RETURN_DOWNSTREAM_BASE: u32 = 14890;
+const RULE_PRIORITY_SYNTHETIC_UPSTREAM_BASE: u32 = 14900;
+const RULE_PRIORITY_SYNTHETIC_UPSTREAM_FALLBACK_BASE: u32 = 14950;
+const RULE_PRIORITY_SYNTHETIC_UPSTREAM_DISABLE_SYSTEM_BASE: u32 = 14980;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UpstreamPrioritySet {
+    pub return_downstream: Option<u32>,
+    pub upstream: u32,
+    pub fallback: u32,
+    pub disable_system: u32,
+}
+
+pub(crate) fn active_priority_set(use_synthetic_root: bool) -> UpstreamPrioritySet {
+    if use_synthetic_root {
+        UpstreamPrioritySet {
+            return_downstream: Some(rule_priority(
+                RULE_PRIORITY_SYNTHETIC_RETURN_DOWNSTREAM_BASE,
+            )),
+            upstream: rule_priority(RULE_PRIORITY_SYNTHETIC_UPSTREAM_BASE),
+            fallback: rule_priority(RULE_PRIORITY_SYNTHETIC_UPSTREAM_FALLBACK_BASE),
+            disable_system: rule_priority(RULE_PRIORITY_SYNTHETIC_UPSTREAM_DISABLE_SYSTEM_BASE),
+        }
+    } else {
+        UpstreamPrioritySet {
+            return_downstream: None,
+            upstream: rule_priority(RULE_PRIORITY_UPSTREAM_BASE),
+            fallback: rule_priority(RULE_PRIORITY_UPSTREAM_FALLBACK_BASE),
+            disable_system: rule_priority(RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM_BASE),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RoutingMutation {
     EnsureIptablesChain {
@@ -282,6 +323,17 @@ pub(crate) async fn clean(
         rule_priority(RULE_PRIORITY_UPSTREAM_DISABLE_SYSTEM_BASE),
     )
     .await?;
+    // WINGS-N fork. Clean the synthetic-root priority range too so a session
+    // that used use_synthetic_root_priorities does not leak rules across a
+    // restart that toggles the flag back off.
+    for base in [
+        RULE_PRIORITY_SYNTHETIC_RETURN_DOWNSTREAM_BASE,
+        RULE_PRIORITY_SYNTHETIC_UPSTREAM_BASE,
+        RULE_PRIORITY_SYNTHETIC_UPSTREAM_FALLBACK_BASE,
+        RULE_PRIORITY_SYNTHETIC_UPSTREAM_DISABLE_SYSTEM_BASE,
+    ] {
+        delete_rule_repeated(handle, IpFamily::Ipv4, rule_priority(base)).await?;
+    }
     clean_ip(handle, command).await?;
     firewall_cleanup::clean().await;
     Ok(())

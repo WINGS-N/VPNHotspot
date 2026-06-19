@@ -511,6 +511,15 @@ async fn resolve_query_accounted(
     if let Some(fallback) = config.fallback_network {
         return query_network(fallback, query).await;
     }
+    // WINGS-N fork. Synthetic root WireGuard tunnels are not registered with
+    // ConnectivityManager so primary_network/fallback_network stay None even
+    // when the device has working upstream connectivity. Fall back to a static
+    // list of DNS servers and forward over plain UDP. Routing of these packets
+    // is left to the kernel routing table picked by the daemon's own routing
+    // rules, which on a working session is the synthetic root tunnel.
+    if !config.fallback_dns_servers.is_empty() {
+        return query_explicit_dns(&config.fallback_dns_servers, query).await;
+    }
     (
         Err(io::Error::new(
             io::ErrorKind::NotConnected,
@@ -518,6 +527,73 @@ async fn resolve_query_accounted(
         )),
         false,
     )
+}
+
+async fn query_explicit_dns(servers: &[String], query: &[u8]) -> (io::Result<Vec<u8>>, bool) {
+    use std::time::Duration;
+    let mut last_err: Option<io::Error> = None;
+    let mut sent = false;
+    for server in servers {
+        let addr = match parse_dns_server(server) {
+            Ok(addr) => addr,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        let socket = match TokioUdpSocket::bind("0.0.0.0:0").await {
+            Ok(socket) => socket,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        if let Err(e) = socket.send_to(query, addr).await {
+            last_err = Some(e);
+            continue;
+        }
+        sent = true;
+        let mut buf = vec![0u8; DNS_MAX_PACKET];
+        match tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut buf)).await {
+            Ok(Ok(n)) => {
+                buf.truncate(n);
+                return (Ok(buf), true);
+            }
+            Ok(Err(e)) => last_err = Some(e),
+            Err(_) => {
+                last_err = Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("dns timeout from {server}"),
+                ));
+            }
+        }
+    }
+    (
+        Err(last_err.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "no fallback dns servers")
+        })),
+        sent,
+    )
+}
+
+fn parse_dns_server(server: &str) -> io::Result<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+    let trimmed = server.trim();
+    if trimmed.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty dns server",
+        ));
+    }
+    let with_port = if trimmed.parse::<std::net::IpAddr>().is_ok() {
+        format!("{trimmed}:{DNS_PORT}")
+    } else {
+        trimmed.to_owned()
+    };
+    with_port
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid dns server"))
 }
 
 async fn resolve_or_error(config: &SessionConfig, query: &[u8]) -> Option<DnsResponse> {
