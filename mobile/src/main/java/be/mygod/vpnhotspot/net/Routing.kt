@@ -297,7 +297,12 @@ class Routing(private val caller: Any, private val downstream: String) {
         fun update(value: Upstream?): Boolean {
             if (upstream == value) return false
             upstream = value
-            interfaces = value?.properties?.allInterfaceNames ?: emptyList()
+            val props = value?.properties
+            // allInterfaceNames is empty for synthetic upstreams that only have
+            // interfaceName populated, fall back to it so the session config
+            // still carries an interface for routing rules.
+            interfaces = props?.allInterfaceNames?.takeIf { it.isNotEmpty() }
+                    ?: listOfNotNull(props?.interfaceName)
             return true
         }
 

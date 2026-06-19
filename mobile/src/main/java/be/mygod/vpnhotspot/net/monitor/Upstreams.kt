@@ -18,18 +18,28 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import timber.log.Timber
+import java.net.NetworkInterface
+import java.net.SocketException
+import java.util.Collections
 import java.util.regex.PatternSyntaxException
 
-data class Upstream(val network: Network, val properties: LinkProperties)
+// network is null for synthetic-root interfaces that are not registered with
+// ConnectivityManager (e.g. WireGuard tunnels managed by us outside of
+// Settings VPN) but still have a working iface in the kernel.
+data class Upstream(val network: Network?, val properties: LinkProperties)
 
 object Upstreams {
     const val KEY_PRIMARY = "service.upstream"
@@ -86,14 +96,60 @@ object Upstreams {
             Timber.d(e)
             ({ value: String -> value == ifaceRegex })
         }
-        return source(
+        val cmSource = source(
             register = { Services.registerNetworkCallback(ifaceRequest, it) },
             onLinkPropertiesChanged = { network, properties ->
                 selectAvailable(network, properties, properties.allInterfaceNames.any(iface))
             },
             onLost = { network -> removeAvailable(network) },
         )
+        // Fall back to a polled NetworkInterface scan: synthetic root tunnels
+        // (WireGuard ifaces we manage outside of Settings VPN) are not seen
+        // through ConnectivityManager, so cmSource never emits for them.
+        return cmSource.combine(syntheticIface(iface)) { cm, synthetic -> cm ?: synthetic }
     }
+
+    private fun syntheticIface(iface: (String) -> Boolean): Flow<Upstream?> = callbackFlow {
+        trySend(null)
+        var lastEmitted: String? = null
+        val job = scope.launch(Dispatchers.IO) {
+            while (isActive) {
+                val ifaceName = findSyntheticIface(iface)
+                if (ifaceName != lastEmitted) {
+                    lastEmitted = ifaceName
+                    trySend(ifaceName?.let { synthesizeUpstream(it) })
+                }
+                delay(1_000)
+            }
+        }
+        awaitClose { job.cancel() }
+    }.buffer(Channel.CONFLATED)
+
+    private fun findSyntheticIface(iface: (String) -> Boolean): String? {
+        val interfaces = try {
+            NetworkInterface.getNetworkInterfaces() ?: return null
+        } catch (e: SocketException) {
+            Timber.d(e)
+            return null
+        }
+        for (ni in Collections.list(interfaces)) {
+            val name = ni?.name ?: continue
+            if (!iface(name)) continue
+            val up = try {
+                ni.isUp && !ni.isLoopback
+            } catch (e: SocketException) {
+                Timber.d(e)
+                false
+            }
+            if (up) return name
+        }
+        return null
+    }
+
+    private fun synthesizeUpstream(ifaceName: String) = Upstream(
+        network = null,
+        properties = LinkProperties().apply { interfaceName = ifaceName },
+    )
 
     val primary: StateFlow<Upstream?> = role(KEY_PRIMARY, vpn)
     val fallback: StateFlow<Upstream?> = role(KEY_FALLBACK, default)
