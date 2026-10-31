@@ -12,7 +12,9 @@ import android.content.pm.ProviderInfo
 import android.content.res.Configuration
 import android.location.LocationManager
 import android.os.Build
+import android.os.ServiceSpecificException
 import android.os.StrictMode
+import android.os.SystemProperties
 import android.os.ext.SdkExtensions
 import android.provider.Settings
 import android.system.Os
@@ -29,12 +31,14 @@ import be.mygod.vpnhotspot.util.CrashlyticsKeyProvider
 import be.mygod.vpnhotspot.util.DeviceStorageApp
 import be.mygod.vpnhotspot.util.InPlaceExecutor
 import be.mygod.vpnhotspot.util.Services
+import be.mygod.vpnhotspot.util.getRootCause
 import be.mygod.vpnhotspot.util.privateLookup
 import be.mygod.vpnhotspot.widget.SmartSnackbar
 import com.google.android.gms.dynamite.DynamiteModule
 import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.analytics.ParametersBuilder
 import com.google.firebase.analytics.logEvent
+import com.google.firebase.crashlytics.CustomKeysAndValues
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import com.google.firebase.provider.FirebaseInitProvider
 import kotlinx.coroutines.DEBUG_PROPERTY_NAME
@@ -87,6 +91,7 @@ class App : Application() {
                 setCustomKey("git", BuildGit.VALUE)
                 setCustomKey("uname.release", Os.uname().release)
                 setCustomKey("build", Build.DISPLAY)
+                setCustomKey("ro.vendor.api_level", SystemProperties.get("ro.vendor.api_level", ""))
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     setCustomKey("extension_s", SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S))
                 }
@@ -102,8 +107,16 @@ class App : Application() {
                     if (priority >= Log.WARN || priority == Log.DEBUG) Log.println(priority, tag, message)
                     if (priority >= Log.INFO && t !is NoShellException) {
                         val crashlyticsKeys = (t as? CrashlyticsKeyProvider)?.crashlyticsKeys
-                        if (crashlyticsKeys == null) FirebaseCrashlytics.getInstance().recordException(t)
-                        else FirebaseCrashlytics.getInstance().recordException(t, crashlyticsKeys)
+                            ?: (t.getRootCause() as? ServiceSpecificException)?.let {
+                                CustomKeysAndValues.Builder()
+                                    .putInt("android.serviceSpecific.errorCode", it.errorCode)
+                                    .build()
+                            }
+                        val reported = if (t.stackTrace.isEmpty()) {
+                            RuntimeException("Stackless exception reported through Timber", t)
+                        } else t
+                        if (crashlyticsKeys == null) FirebaseCrashlytics.getInstance().recordException(reported)
+                        else FirebaseCrashlytics.getInstance().recordException(reported, crashlyticsKeys)
                     }
                 }
             }

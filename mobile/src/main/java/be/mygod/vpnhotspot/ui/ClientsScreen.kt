@@ -2,10 +2,10 @@ package be.mygod.vpnhotspot.ui
 
 import android.content.Context
 import android.content.res.Configuration
+import android.os.Build
 import android.os.SystemClock
 import android.text.format.Formatter
 import androidx.annotation.DrawableRes
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,7 +25,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.scrollbar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -190,6 +189,9 @@ private fun ClientRow(
             if (it == client.iface) return@forEach
             line { appendClientAddress(client, it, linkStyles) }
         }
+        if (Build.VERSION.SDK_INT >= 37) client.wifiP2pConnectionInfo?.let { info ->
+            wifiP2pConnectionInfoLabel(context, info)?.let { line { append(it) } }
+        }
         client.ip.entries.forEach { (ip, info) ->
             line {
                 appendIpAddress(ip, linkStyles)
@@ -232,11 +234,7 @@ private fun ClientRow(
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
-            modifier = Modifier.scrollbar(
-                state = menuScrollState.scrollIndicatorState,
-                orientation = Orientation.Vertical,
-                isFadeEnabled = false,
-            ),
+            modifier = Modifier.nonInteractiveVerticalScrollbar(menuScrollState.scrollIndicatorState),
             scrollState = menuScrollState,
         ) {
             DropdownMenuItem(
@@ -290,6 +288,7 @@ private fun ClientRow(
         ) {
             mutableStateOf(TextFieldValue(initialNickname, TextRange(initialNickname.length)))
         }
+        val nicknameHint = stringResource(R.string.clients_nickname_hint)
         AlertDialog(
             onDismissRequest = { editingNickname = false },
             title = { Text(stringResource(R.string.clients_nickname_title, client.mac)) },
@@ -299,8 +298,9 @@ private fun ClientRow(
                     onValueChange = { nicknameDraft = it },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .focusRequester(focusRequester),
-                    placeholder = { Text(stringResource(R.string.clients_nickname_hint)) },
+                        .focusRequester(focusRequester)
+                        .semantics { contentDescription = nicknameHint },
+                    placeholder = { Text(nicknameHint) },
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.Words,
                         imeAction = ImeAction.Done,
@@ -353,11 +353,7 @@ private fun ClientRow(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f, fill = false)
-                    .scrollbar(
-                        state = state.scrollIndicatorState,
-                        orientation = Orientation.Vertical,
-                        isFadeEnabled = false,
-                    ),
+                    .nonInteractiveVerticalScrollbar(state.scrollIndicatorState),
                 contentPadding = modalBottomSheetListContentPadding(),
             ) {
                 item("stats") {

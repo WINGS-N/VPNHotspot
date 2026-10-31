@@ -1,7 +1,7 @@
 package be.mygod.vpnhotspot.root
 
 import android.net.wifi.SoftApConfiguration
-import android.os.Build
+import android.net.wifi.WifiConfiguration
 import android.os.IBinder
 import androidx.annotation.RequiresApi
 import androidx.collection.mutableScatterMapOf
@@ -11,17 +11,18 @@ import be.mygod.librootkotlinx.RootCommand
 import be.mygod.librootkotlinx.RootCommandNoResult
 import be.mygod.librootkotlinx.RootFlow
 import be.mygod.vpnhotspot.net.wifi.WifiApManager
+import be.mygod.vpnhotspot.util.UnblockCentral
 import be.mygod.vpnhotspot.util.binderCallbackFlow
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
@@ -148,9 +149,7 @@ object WifiApCommands {
 
     private val softApCallbackRelay = SoftApCallbackRelay {
         var failure = collect(WifiApManager.softApCallbackFlow) ?: return@SoftApCallbackRelay
-        if (Build.VERSION.SDK_INT >= 31) {
-            failure = collectRoot(softApCallbackBinderFlow, failure) ?: return@SoftApCallbackRelay
-        }
+        failure = collectRoot(softApCallbackBinderFlow, failure) ?: return@SoftApCallbackRelay
         if (hasExpensiveSubscribers()) failure = (collectRoot(flow {
             RootManager.use { emitAll(it.flow(SoftApCallbackFlow())) }
         }, failure) ?: return@SoftApCallbackRelay)
@@ -182,14 +181,14 @@ object WifiApCommands {
     }
 
     @Parcelize
-    @RequiresApi(31)
-    data class RegisterSoftApCallback(val callback: IBinder) : RootCommandNoResult {
-        override suspend fun execute() = null.also { WifiApManager.registerSoftApCallback(callback) }
+    data class RegisterSoftApCallback(val callback: IBinder, val callbackIdentifier: Int) : RootCommandNoResult {
+        override suspend fun execute() =
+            null.also { WifiApManager.registerSoftApCallbackBinder(callback, callbackIdentifier) }
     }
     @Parcelize
-    @RequiresApi(31)
-    data class UnregisterSoftApCallback(val callback: IBinder) : RootCommandNoResult {
-        override suspend fun execute() = null.also { WifiApManager.unregisterSoftApCallback(callback) }
+    data class UnregisterSoftApCallback(val callback: IBinder, val callbackIdentifier: Int) : RootCommandNoResult {
+        override suspend fun execute() =
+            null.also { WifiApManager.unregisterSoftApCallbackBinder(callback, callbackIdentifier) }
     }
     @Parcelize
     @RequiresApi(33)
@@ -201,13 +200,13 @@ object WifiApCommands {
     data class UnregisterLocalOnlyHotspotSoftApCallback(val callback: IBinder) : RootCommandNoResult {
         override suspend fun execute() = null.also { WifiApManager.unregisterLocalOnlyHotspotSoftApCallback(callback) }
     }
-    @RequiresApi(31)
     private val softApCallbackBinderFlow = binderCallbackFlow("Soft AP binder callback") {
         if (binderSoftApCallbackCapability == SoftApCallbackCapability.Unavailable) {
             throw WifiApManager.SoftApCallbackUnavailableException()
         }
         val callback = try {
-            WifiApManager.newSoftApCallbackBinder(WifiApManager.softApCallback(::push))
+            // IFACE_IP_MODE_TETHERED: https://android.googlesource.com/platform/packages/modules/Wifi/+/android-13.0.0_r1/framework/java/android/net/wifi/WifiManager.java#980
+            UnblockCentral.WifiManager_SoftApCallbackProxy(WifiApManager.softApCallback(::push), 1)
         } catch (e: ReflectiveOperationException) {
             binderSoftApCallbackCapability = SoftApCallbackCapability.Unavailable
             throw WifiApManager.SoftApCallbackUnavailableException(e)
@@ -221,18 +220,19 @@ object WifiApCommands {
             binderSoftApCallbackCapability = SoftApCallbackCapability.Unavailable
             throw WifiApManager.SoftApCallbackUnavailableException(e)
         }
+        val callbackIdentifier = System.identityHashCode(callback)
         var registered = false
         try {
             RootManager.use { root ->
                 withContext(NonCancellable) {
-                    root.execute(RegisterSoftApCallback(callback))
+                    root.execute(RegisterSoftApCallback(callback, callbackIdentifier))
                     registered = true
                 }
             }
             binderSoftApCallbackCapability = SoftApCallbackCapability.Available
         } catch (e: CancellationException) {
             withContext(NonCancellable) {
-                if (registered) RootManager.use { it.execute(UnregisterSoftApCallback(callback)) }
+                if (registered) RootManager.use { it.execute(UnregisterSoftApCallback(callback, callbackIdentifier)) }
             }
             throw e
         } catch (e: NoShellException) {
@@ -242,7 +242,7 @@ object WifiApCommands {
         }
         return@binderCallbackFlow {
             try {
-                if (registered) RootManager.use { it.execute(UnregisterSoftApCallback(callback)) }
+                if (registered) RootManager.use { it.execute(UnregisterSoftApCallback(callback, callbackIdentifier)) }
             } catch (_: CancellationException) {
             } catch (e: Exception) {
                 Timber.w(e)
@@ -256,7 +256,8 @@ object WifiApCommands {
                 throw WifiApManager.SoftApCallbackUnavailableException()
             }
             val callback = try {
-                WifiApManager.newLocalOnlyHotspotSoftApCallbackBinder(WifiApManager.softApCallback(::push))
+                // IFACE_IP_MODE_LOCAL_ONLY: https://android.googlesource.com/platform/packages/modules/Wifi/+/android-13.0.0_r1/framework/java/android/net/wifi/WifiManager.java#990
+                UnblockCentral.WifiManager_SoftApCallbackProxy(WifiApManager.softApCallback(::push), 2)
             } catch (e: ReflectiveOperationException) {
                 binderLocalOnlyHotspotSoftApCallbackCapability = SoftApCallbackCapability.Unavailable
                 throw WifiApManager.SoftApCallbackUnavailableException(e)
@@ -304,9 +305,7 @@ object WifiApCommands {
         }
 
     @Parcelize
-    @Deprecated("Use GetConfiguration instead", ReplaceWith("GetConfiguration"))
-    @Suppress("DEPRECATION")
-    class GetConfigurationLegacy : RootCommand<android.net.wifi.WifiConfiguration?> {
+    class GetConfigurationLegacy : RootCommand<WifiConfiguration?> {
         override suspend fun execute() = WifiApManager.configurationLegacy
     }
     @Parcelize
@@ -316,11 +315,7 @@ object WifiApCommands {
     }
 
     @Parcelize
-    @Deprecated("Use SetConfiguration instead", ReplaceWith("SetConfiguration"))
-    @Suppress("DEPRECATION")
-    data class SetConfigurationLegacy(
-        val configuration: android.net.wifi.WifiConfiguration?,
-    ) : RootCommand<ParcelableBoolean> {
+    data class SetConfigurationLegacy(val configuration: WifiConfiguration?) : RootCommand<ParcelableBoolean> {
         override suspend fun execute() = ParcelableBoolean(WifiApManager.setConfiguration(configuration))
     }
     @Parcelize

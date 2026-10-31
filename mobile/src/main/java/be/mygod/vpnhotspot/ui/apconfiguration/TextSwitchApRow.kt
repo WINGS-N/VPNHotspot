@@ -2,7 +2,6 @@ package be.mygod.vpnhotspot.ui.apconfiguration
 
 import androidx.annotation.DrawableRes
 import androidx.annotation.StringRes
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,7 +18,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextFieldLabelPosition
-import androidx.compose.material3.scrollbar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +27,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -38,7 +38,9 @@ import be.mygod.vpnhotspot.ui.DialogDismissButton
 import be.mygod.vpnhotspot.ui.PreferenceRow
 import be.mygod.vpnhotspot.ui.PreferenceSplitSwitch
 import be.mygod.vpnhotspot.ui.PreferenceSwitch
+import be.mygod.vpnhotspot.ui.nonInteractiveVerticalScrollbar
 import be.mygod.vpnhotspot.ui.rememberDialogFocusRequester
+import be.mygod.vpnhotspot.ui.rememberPreferenceSplitFocusModifiers
 
 @Composable
 fun TextSwitchApRow(
@@ -67,9 +69,12 @@ fun TextSwitchApRow(
     }
     val text = draft.text.toString()
     val error = validator(text)
+    val titleText = stringResource(title)
+    val (rowFocusModifier, switchFocusModifier) = rememberPreferenceSplitFocusModifiers()
     PreferenceRow(
         icon = icon,
-        title = stringResource(title),
+        title = titleText,
+        modifier = rowFocusModifier,
         summaryContent = if (summary == null && valueSummary.isEmpty()) null else {
             {
                 Column {
@@ -80,7 +85,9 @@ fun TextSwitchApRow(
         },
         trailing = {
             PreferenceSplitSwitch(
+                label = titleText,
                 checked = checked,
+                modifier = switchFocusModifier,
                 onCheckedChange = onCheckedChange,
             )
         },
@@ -96,11 +103,12 @@ fun TextSwitchApRow(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = stringResource(title),
+                        text = titleText,
                         modifier = Modifier.weight(1f),
                     )
                     PreferenceSwitch(
                         checked = checked,
+                        modifier = Modifier.semantics { contentDescription = titleText },
                         onCheckedChange = onCheckedChange,
                     )
                 }
@@ -121,11 +129,7 @@ fun TextSwitchApRow(
                             .focusRequester(focusRequester)
                             .then(
                                 if (multiline) {
-                                    Modifier.scrollbar(
-                                        state = scrollState.scrollIndicatorState,
-                                        orientation = Orientation.Vertical,
-                                        isFadeEnabled = false,
-                                    )
+                                    Modifier.nonInteractiveVerticalScrollbar(scrollState.scrollIndicatorState)
                                 } else Modifier
                             ),
                         enabled = fieldEnabled,

@@ -14,7 +14,7 @@ represents session routing state as `RoutingMutation` values:
 
 | Mutation | External apply | Session rollback |
 | --- | --- | --- |
-| `EnsureIptablesChain` | `iptables-restore`/`ip6tables-restore` `-N <chain>` | no-op; chains are scaffold state |
+| `EnsureIptablesChain` | `iptables-restore`/`ip6tables-restore` `-N <chain>`; after a nonzero exit, verify the chain with `-L <chain> -n` | no-op; chains are scaffold state |
 | `Iptables` | `iptables-restore`/`ip6tables-restore` `-I <chain> ...` | delete the same rule with `-D <chain> ...` |
 | `IpForward` | `ndc ipfwd enable vpnhotspot_<downstream>`, or `/proc/sys/net/ipv4/ip_forward = 1` fallback | `ndc ipfwd disable vpnhotspot_<downstream>` only |
 | `Ip` | rtnetlink rule, route, or address replace | rtnetlink delete for the same rule, route, or address |
@@ -26,8 +26,19 @@ nonfatal reports; successful mutations stay applied and are not rolled back only
 because a later best-effort mutation failed. A failed desired mutation is not
 recorded in `applied`, so a later reconcile can try it again.
 
+Creating an existing iptables chain normally exits nonzero. That result is only
+treated as success after the read-only list command verifies that the chain is
+present. If creation and verification both fail, the verification stderr is
+reported as a structured ensure failure; reconciliation remains best effort and
+can retry the ensure later.
+
 The `applied` list is only the current process rollback list. It is not
 persisted and is not a Clean source of truth.
+
+`routing::Runtime` owns one rtnetlink request connection for the session
+lifetime. Startup transfers the connection used for downstream discovery;
+replacement and normal stop reuse it. Request failures are reported and later
+operations remain best effort; the runtime does not reconnect.
 
 ## Session Desired Mutations
 
@@ -304,11 +315,15 @@ listener interception rule to choose. The probe adds a temporary
 detached-interface rule at `<nat66-daemon-priority>`:
 `iif vpnhs_probe0 priority <nat66-daemon-priority> ipproto tcp lookup 900`. Routing
 then dumps IPv6 rules and requires the echoed rule to include `ipproto tcp`.
-The probe deletes both the exact protocol rule and a possible no-protocol stale
-form. This detached interface is intentional: kernels without `FRA_IP_PROTO`
-can silently ignore the unknown attribute and accept a bare
-`iif ... lookup 900` rule, so probing with the real downstream would create a
-transient or leaked traffic-affecting rule.
+Normal probe cleanup deletes at most one rule: the exact protocol form when the
+dump echoed it, or a selector without `ipproto` otherwise. The protocol-less
+selector is also the best-effort rollback when the add or dump outcome is
+uncertain. Missing state is accepted; other deletion failures are reported.
+Repeated deletion of stale or duplicate rules is reserved for Clean. This
+detached interface is intentional: kernels without `FRA_IP_PROTO` can silently
+ignore the unknown attribute and accept a bare `iif ... lookup 900` rule, so
+probing with the real downstream would create a transient or leaked
+traffic-affecting rule.
 
 If the probe fails, routing uses fwmark fallback mode. When `uname.release`
 parses as Linux 4.17 or newer, the fallback is also reported as a structured

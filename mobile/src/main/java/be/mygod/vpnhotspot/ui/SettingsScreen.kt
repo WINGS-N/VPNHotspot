@@ -13,7 +13,6 @@ import android.os.ext.SdkExtensions
 import android.text.Html
 import androidx.annotation.DrawableRes
 import androidx.annotation.StringRes
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,7 +28,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.scrollbar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -46,6 +44,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.fromHtml
@@ -130,9 +130,6 @@ fun SettingsScreen(snackbarHostState: SnackbarHostState) {
     val autoStart by if (inspectionMode) {
         remember { mutableStateOf(false) }
     } else rememberPreferenceBoolean(BootReceiver.KEY, false)
-    val repeaterSafeMode by if (inspectionMode) {
-        remember { mutableStateOf(true) }
-    } else rememberPreferenceBoolean(RepeaterService.KEY_SAFE_MODE, true)
     val useSystemTempHotspot by if (inspectionMode) {
         remember { mutableStateOf(false) }
     } else rememberPreferenceBoolean(LocalOnlyHotspotService.KEY_USE_SYSTEM, false)
@@ -161,8 +158,6 @@ fun SettingsScreen(snackbarHostState: SnackbarHostState) {
             onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
     }
-    val showRepeaterSafeMode = inspectionMode || (Services.p2p != null && RepeaterService.safeModeConfigurable)
-
     SettingsList {
         preferenceGroup(key = R.string.settings_service_clean) {
             row(R.string.settings_service_clean) {
@@ -335,17 +330,6 @@ fun SettingsScreen(snackbarHostState: SnackbarHostState) {
                     },
                 )
             }
-            if (showRepeaterSafeMode) row(R.string.settings_service_repeater_safe_mode) {
-                SwitchPreferenceRow(
-                    icon = R.drawable.ic_health_and_safety,
-                    title = R.string.settings_service_repeater_safe_mode,
-                    summary = stringResource(R.string.settings_service_repeater_safe_mode_summary),
-                    checked = repeaterSafeMode,
-                    onCheckedChange = {
-                        if (!inspectionMode) app.pref.edit { putBoolean(RepeaterService.KEY_SAFE_MODE, it) }
-                    },
-                )
-            }
             if (Build.VERSION.SDK_INT >= 30) row(R.string.settings_service_temp_hotspot_use_system) {
                 SwitchPreferenceRow(
                     icon = R.drawable.ic_content_copy,
@@ -465,12 +449,13 @@ private fun TextPreferenceRow(
     val filteredSuggestions = remember(suggestions, draft.text) {
         suggestions.filter { draft.text.isBlank() || it.contains(draft.text, ignoreCase = true) }
     }
+    val titleText = stringResource(title)
     LaunchedEffect(editing, suggestions) {
         if (editing && suggestions.isNotEmpty()) suggestionsExpanded = true
     }
     PreferenceRow(
         icon = icon,
-        title = stringResource(title),
+        title = titleText,
         summaryContent = { Text(summary) },
         onClick = { editing = true },
     )
@@ -478,7 +463,7 @@ private fun TextPreferenceRow(
         val focusRequester = rememberDialogFocusRequester()
         AlertDialog(
             onDismissRequest = { editing = false },
-            title = { Text(stringResource(title)) },
+            title = { Text(titleText) },
             text = {
                 val menuExpanded = suggestionsExpanded && filteredSuggestions.isNotEmpty()
                 val menuScrollState = rememberScrollState()
@@ -500,7 +485,8 @@ private fun TextPreferenceRow(
                             modifier = Modifier
                                 .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryEditable)
                                 .fillMaxWidth()
-                                .focusRequester(focusRequester),
+                                .focusRequester(focusRequester)
+                                .semantics { contentDescription = titleText },
                             placeholder = { Text(placeholder) },
                             trailingIcon = {
                                 ExposedDropdownMenuDefaults.TrailingIcon(
@@ -515,11 +501,7 @@ private fun TextPreferenceRow(
                         ExposedDropdownMenu(
                             expanded = menuExpanded,
                             onDismissRequest = { suggestionsExpanded = false },
-                            modifier = Modifier.scrollbar(
-                                state = menuScrollState.scrollIndicatorState,
-                                orientation = Orientation.Vertical,
-                                isFadeEnabled = false,
-                            ),
+                            modifier = Modifier.nonInteractiveVerticalScrollbar(menuScrollState.scrollIndicatorState),
                             scrollState = menuScrollState,
                         ) {
                             for (suggestion in filteredSuggestions) DropdownMenuItem(
@@ -613,19 +595,13 @@ private fun SwitchPreferenceRow(
     enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
 ) {
-    PreferenceRow(
+    PreferenceSwitchRow(
         icon = icon,
         title = stringResource(title),
         summary = summary,
+        checked = checked,
         enabled = enabled,
-        trailing = {
-            PreferenceSwitch(
-                checked = checked,
-                enabled = enabled,
-                onCheckedChange = if (enabled) onCheckedChange else null,
-            )
-        },
-        onClick = { onCheckedChange(!checked) },
+        onCheckedChange = onCheckedChange,
     )
 }
 

@@ -13,6 +13,7 @@ import android.net.wifi.SoftApCapability
 import android.net.wifi.SoftApConfiguration
 import android.net.wifi.SoftApInfo
 import android.net.wifi.WifiClient
+import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiManager
 import android.net.wifi.`WifiManager$SoftApCallback`
 import android.os.Build
@@ -34,11 +35,16 @@ import be.mygod.vpnhotspot.util.ConstantLookup
 import be.mygod.vpnhotspot.util.InPlaceExecutor
 import be.mygod.vpnhotspot.util.Services
 import be.mygod.vpnhotspot.util.UnblockCentral
-import be.mygod.vpnhotspot.util.findIdentifier
 import be.mygod.vpnhotspot.util.binderCallbackFlow
+import be.mygod.vpnhotspot.util.callSuper
+import be.mygod.vpnhotspot.util.findIdentifier
+import be.mygod.vpnhotspot.util.matches
 import kotlinx.parcelize.Parcelize
 import timber.log.Timber
+import java.lang.reflect.InvocationHandler
 import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Method
+import java.lang.reflect.Proxy
 import java.util.concurrent.Executor
 
 object WifiApManager {
@@ -184,8 +190,7 @@ object WifiApManager {
     private val getWifiApConfiguration by lazy { WifiManager::class.java.getDeclaredMethod("getWifiApConfiguration") }
     @Suppress("DEPRECATION")
     private val setWifiApConfiguration by lazy {
-        WifiManager::class.java.getDeclaredMethod("setWifiApConfiguration",
-                android.net.wifi.WifiConfiguration::class.java)
+        WifiManager::class.java.getDeclaredMethod("setWifiApConfiguration", WifiConfiguration::class.java)
     }
     @get:RequiresApi(30)
     private val getSoftApConfiguration by lazy { WifiManager::class.java.getDeclaredMethod("getSoftApConfiguration") }
@@ -197,18 +202,13 @@ object WifiApManager {
     /**
      * Requires NETWORK_SETTINGS permission (or root) on API 30+, and OVERRIDE_WIFI_CONFIG on API 29.
      */
-    @Deprecated("Use configuration instead", ReplaceWith("configuration"))
-    @Suppress("DEPRECATION")
-    val configurationLegacy get() = getWifiApConfiguration(Services.wifi) as android.net.wifi.WifiConfiguration?
+    val configurationLegacy get() = getWifiApConfiguration(Services.wifi) as WifiConfiguration?
     /**
      * Requires NETWORK_SETTINGS permission (or root).
      */
     @get:RequiresApi(30)
     val configuration get() = getSoftApConfiguration(Services.wifi) as SoftApConfiguration
-    @Deprecated("Use SoftApConfiguration instead")
-    @Suppress("DEPRECATION")
-    fun setConfiguration(value: android.net.wifi.WifiConfiguration?) =
-        setWifiApConfiguration(Services.wifi, value) as Boolean
+    fun setConfiguration(value: WifiConfiguration?) = setWifiApConfiguration(Services.wifi, value) as Boolean
     fun setConfiguration(value: SoftApConfiguration) = setSoftApConfiguration(Services.wifi, value) as Boolean
 
     val failureReasonLookup = ConstantLookup<WifiManager>("SAP_START_FAILURE_", "GENERAL", "NO_CHANNEL")
@@ -229,15 +229,6 @@ object WifiApManager {
      * https://android.googlesource.com/platform/packages/modules/Wifi/+/android-13.0.0_r1/framework/java/android/net/wifi/WifiManager.java#360
      */
     private const val EXTRA_PARAM_KEY_ATTRIBUTION_SOURCE = "EXTRA_PARAM_KEY_ATTRIBUTION_SOURCE"
-    /**
-     * https://android.googlesource.com/platform/packages/modules/Wifi/+/android-13.0.0_r1/framework/java/android/net/wifi/WifiManager.java#980
-     */
-    private const val IFACE_IP_MODE_TETHERED = 1
-    /**
-     * https://android.googlesource.com/platform/packages/modules/Wifi/+/android-13.0.0_r1/framework/java/android/net/wifi/WifiManager.java#990
-     */
-    private const val IFACE_IP_MODE_LOCAL_ONLY = 2
-
     sealed class Event : Parcelable {
         @Parcelize
         data class OnStateChanged(val state: Int, val failureReason: Int) : Event()
@@ -260,8 +251,28 @@ object WifiApManager {
         data class OnClientsDisconnected(val info: SoftApInfo, val clients: List<WifiClient>) : Event()
     }
 
-    @RequiresApi(30)
-    fun softApCallback(push: (Event) -> Boolean) = object : `WifiManager$SoftApCallback` {
+    fun softApCallback(push: (Event) -> Boolean) = if (Build.VERSION.SDK_INT < 30) Proxy.newProxyInstance(
+        `WifiManager$SoftApCallback`::class.java.classLoader,
+        arrayOf(`WifiManager$SoftApCallback`::class.java),
+        object : InvocationHandler {
+            override fun invoke(proxy: Any, method: Method, args: Array<out Any?>?) = when {
+                method.matches("onStateChanged", Integer.TYPE, Integer.TYPE) -> null.also {
+                    push(Event.OnStateChanged(args!![0] as Int, args[1] as Int))
+                }
+                method.matches("onNumClientsChanged", Integer.TYPE) -> null.also {
+                    push(Event.OnNumClientsChanged(args!![0] as Int))
+                }
+                else -> try {
+                    callSuper(`WifiManager$SoftApCallback`::class.java, proxy, method, args)
+                } catch (e: Throwable) {
+                    // Legacy SoftApCallback is a hidden interface with no default implementations
+                    // OEM Android 10 builds may add abstract callbacks like onStaConnected/onStaDisconnected
+                    Timber.w(e)
+                    null
+                }
+            }
+        },
+    ) else object : `WifiManager$SoftApCallback` {
         override fun onStateChanged(state: Int, failureReason: Int) {
             push(Event.OnStateChanged(state, failureReason))
         }
@@ -311,14 +322,7 @@ object WifiApManager {
         if (directSoftApCallbackCapability == SoftApCallbackCapability.Unavailable) {
             throw SoftApCallbackUnavailableException()
         }
-        val callback = if (Build.VERSION.SDK_INT < 30) object : `WifiManager$SoftApCallback` {
-            override fun onStateChanged(state: Int, failureReason: Int) {
-                push(Event.OnStateChanged(state, failureReason))
-            }
-            override fun onNumClientsChanged(numClients: Int) {
-                push(Event.OnNumClientsChanged(numClients))
-            }
-        } else softApCallback(::push)
+        val callback = softApCallback(::push)
         try {
             if (Build.VERSION.SDK_INT >= 30) {
                 registerSoftApCallback(Services.wifi, InPlaceExecutor, callback)
@@ -379,28 +383,28 @@ object WifiApManager {
         }
     }
 
-    @RequiresApi(31)
-    fun newSoftApCallbackBinder(callback: `WifiManager$SoftApCallback`, mode: Int = IFACE_IP_MODE_TETHERED) =
-        UnblockCentral.WifiManager_SoftApCallbackProxy.let { (constructor, legacy) ->
-            if (legacy) {
-                if (mode != IFACE_IP_MODE_TETHERED) {
-                    throw NoSuchMethodException("SoftApCallbackProxy mode constructor")
-                }
-                constructor.newInstance(Services.wifi, InPlaceExecutor, callback)
-            } else constructor.newInstance(Services.wifi, InPlaceExecutor, callback, mode)
-        } as IBinder
-    @RequiresApi(33)
-    fun newLocalOnlyHotspotSoftApCallbackBinder(callback: `WifiManager$SoftApCallback`) =
-        newSoftApCallbackBinder(callback, IFACE_IP_MODE_LOCAL_ONLY)
-
-    @get:RequiresApi(31)
     private val iWifiManager by lazy { UnblockCentral.WifiManager_mService.get(Services.wifi) as IWifiManager }
-    @RequiresApi(31)
-    fun registerSoftApCallback(callback: IBinder) =
-        iWifiManager.registerSoftApCallback(ISoftApCallback.Stub.asInterface(callback))
-    @RequiresApi(31)
-    fun unregisterSoftApCallback(callback: IBinder) =
-        iWifiManager.unregisterSoftApCallback(ISoftApCallback.Stub.asInterface(callback))
+    val registerSoftApCallbackBinder: (IBinder, Int) -> Unit by lazy {
+        try {
+            val method = IWifiManager::class.java.getMethod("registerSoftApCallback", ISoftApCallback::class.java);
+            { callback, _ -> method(iWifiManager, ISoftApCallback.Stub.asInterface(callback)) }
+        } catch (e: NoSuchMethodException) {
+            if (Build.VERSION.SDK_INT >= 31) Timber.w(e)
+            val method = IWifiManager::class.java.getMethod("registerSoftApCallback", IBinder::class.java,
+                ISoftApCallback::class.java, Integer.TYPE);
+            { callback, id -> method(iWifiManager, callback, ISoftApCallback.Stub.asInterface(callback), id) }
+        }
+    }
+    val unregisterSoftApCallbackBinder: (IBinder, Int) -> Unit by lazy {
+        try {
+            val method = IWifiManager::class.java.getMethod("unregisterSoftApCallback", ISoftApCallback::class.java);
+            { callback, _ -> method(iWifiManager, ISoftApCallback.Stub.asInterface(callback)) }
+        } catch (e: NoSuchMethodException) {
+            if (Build.VERSION.SDK_INT >= 31) Timber.w(e)
+            val method = IWifiManager::class.java.getMethod("unregisterSoftApCallback", Integer.TYPE);
+            { _, id -> method(iWifiManager, id) }
+        }
+    }
     @RequiresApi(33)
     fun registerLocalOnlyHotspotSoftApCallback(callback: IBinder) =
         iWifiManager.registerLocalOnlyHotspotSoftApCallback(ISoftApCallback.Stub.asInterface(callback), Bundle().apply {

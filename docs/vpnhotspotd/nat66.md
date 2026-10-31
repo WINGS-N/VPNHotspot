@@ -34,6 +34,10 @@ or per-packet work should clone a config snapshot at the point where a stable
 decision is needed. Long-lived tasks should not keep mutable references to
 session config across awaits.
 
+ICMP registration uses the session routing request connection before routing
+takes ownership. The RA task owns separate request and IPv6-address event
+connections.
+
 ## Ownership Levels
 
 NAT66 state is split by lifetime:
@@ -41,10 +45,12 @@ NAT66 state is split by lifetime:
 | Lifetime | Owner | State |
 | --- | --- | --- |
 | Process | `IcmpDispatcher` | NFQUEUE task on queue `30000`, ICMP session registrations, shared Echo state, upstream ICMP sockets |
+| Process | `ReplySocketPool` | daemon reply mark, exact UDP reply-source registry, socket leases shared across sessions |
 | Session | `nat66::Runtime` | committed per-MAC TCP/UDP capabilities, optional RA task, ICMP registration, cleanup prefixes, counter store |
+| RA task | `nat66/ra.rs` | IPv6-address event and request connections, raw ICMPv6 receive socket, periodic/suppression state |
 | Client | per-MAC runtime | TCP/UDP listener ports, stop token, active DNS/NAT66 tasks, source-scoped counters |
-| Listener | TCP/UDP loops | Accepted TCP connections, UDP association table, reply socket pool |
-| Flow | TCP task or UDP association task | MAC/downstream accounting context, upstream socket, downstream reply path, ICMP error registration where applicable |
+| Listener | TCP/UDP loops | Accepted TCP connections, UDP association table, per-listener DNS reply-socket anchor |
+| Flow | TCP task, UDP association task, or UDP DNS query task | MAC/downstream accounting context, upstream socket, downstream reply path and reply-socket lease, ICMP error registration where applicable |
 
 The process-wide dispatcher exists because ICMP interception uses one NFQUEUE
 number. Sessions register by downstream interface index and committed MAC set.
@@ -193,10 +199,11 @@ responses. The listener owns downstream receives and association creation. The
 association task reports activity back to the listener, and idle associations
 are cancelled after the NAT66 idle timeout.
 
-Reply socket reservations keep the pool aware of source/mark binds while an
-association may hold a cached reply socket. Association teardown releases the
-cached socket reference before releasing the reservation, so a replacement
-association cannot race a duplicate transparent bind for the same reply source.
+Reply socket leases keep the daemon-wide pool aware of an exact reply-source
+bind while an association may send responses through it. Association teardown
+releases its lease, but the socket remains registered while another association,
+DNS anchor, or DNS query task still holds a lease. This prevents overlapping
+per-MAC listeners or sessions from racing a duplicate transparent bind.
 
 ICMP error translation for UDP is association-local and MAC-attributed. The
 association registers only while the connected upstream UDP socket is alive, and
@@ -209,14 +216,24 @@ over an internal channel. If an association closes, the listener removes it only
 when the close event matches the current association ID for that key; stale
 close events from an older task must not remove a newer association.
 
-The reply socket pool separates DNS replies from user UDP associations. User
-associations reserve a reply source while alive so downstream responses can use
-the original destination as their source. DNS keeps retained reply sockets by
-source/mark because DNS requests are short child tasks rather than entries in
-the association table. Host- or network-unreachable downstream reply sends are
-treated as client reachability churn and logged. Reply socket acquisition,
-replacement, and other unexpected send failures are reported as structured
-nonfatals.
+The control process owns one reply socket pool for every NAT66 UDP listener in
+every session. Its reply mark is immutable, and it serializes create-or-reuse
+for each exact IPv6 source address and port. Consequently, one bound socket for
+that source and mark is shared across MAC listeners and sessions rather than
+being recreated in each listener. User associations hold leases while alive.
+Each listener also keeps a DNS anchor lease for its gateway source, and each
+short-lived DNS query task holds its own lease so listener cancellation cannot
+close the socket while a detached query is completing. The last lease removes
+the entry and closes the socket.
+
+A reply socket remains a nonblocking IPv6 UDP socket with `SO_REUSEADDR`, the
+daemon `SO_MARK`, and `IPV6_TRANSPARENT`, bound to the exact original destination
+address and port that must appear as the downstream reply source. A failed
+downstream send is retried once on the same leased file descriptor; it does not
+create a second exact bind while the original socket is still live. Host- or
+network-unreachable downstream reply sends are treated as client reachability
+churn and logged. Reply socket acquisition and other unexpected send failures
+remain structured nonfatals.
 
 UDP hop-limit behavior is part of the NAT66 contract. Missing hop-limit
 metadata is reported and the datagram is dropped. Expired hop limit produces a
@@ -267,6 +284,12 @@ The daemon allocates a rewritten Echo identifier/sequence, records the original
 client MAC, client IPv6 address, and hop limit, sends a daemon-owned upstream
 Echo Request on the selected Android network, and restores the client-visible
 identifier when the Echo Reply returns.
+The NFQUEUE path does not reassemble fragmented downstream Echo Requests, so an
+Echo Request whose Fragment header actually fragments the ICMPv6 payload is not
+proxied. Atomic fragments continue through the ordinary Echo path.
+If the selected network reports host- or network-unreachable during the
+upstream Echo send, the daemon logs the route loss, removes the Echo allocation,
+and drops the intercepted request without emitting a structured nonfatal.
 
 Echo upstream sockets are per Android network and shared with UDP ICMP error
 translation. They stay alive while that network has Echo allocations or UDP
@@ -278,10 +301,16 @@ The translated error types are Destination Unreachable, Packet Too Big, Time
 Exceeded, and Parameter Problem. Generated downstream ICMP errors preserve the
 upstream offender source when that source is meaningful on the downstream link;
 link-local upstream offenders are rewritten to the NAT66 gateway. Error quotes
-are capped so the complete generated IPv6 packet stays within the IPv6 minimum
-MTU. Expected kernel socket errors from remote ICMP delivery are consumed after
-error-queue processing when no daemon-owned quote can be mapped. Unmapped remote
-ICMP errors are not guessed into downstream errors.
+are parsed through complete supported IPv6 extension-header chains. An atomic or
+first fragment can be mapped when its Fragment offset is zero and the quote
+contains the complete Echo or UDP header; non-initial fragments cannot identify
+daemon-owned transport state and are left unmapped. Reverse translation rewrites
+the existing quote, including the transport checksum, while preserving its
+extension headers and Fragment identification. Quotes are capped so the complete
+generated IPv6 packet stays within the IPv6 minimum MTU. Expected kernel socket
+errors from remote ICMP delivery are consumed after error-queue processing when
+no daemon-owned quote can be mapped. Unmapped remote ICMP errors are not guessed
+into downstream errors.
 
 ICMPv6 counters count one sent unit per daemon-owned upstream Echo Request and
 one received unit per upstream Echo Reply or upstream ICMPv6 error translated
@@ -293,6 +322,10 @@ inflate upstream counters.
 The RA task owns NAT66 prefix advertisement on the downstream. It sends current
 RAs periodically, answers router solicitations, watches downstream IPv6 address
 changes, and suppresses or withdraws non-NAT66 downstream prefixes when needed.
+Solicitations from a usable source address are answered to that source. A
+solicitation from the unspecified address `::` is answered with a
+downstream-scoped all-nodes multicast RA to `ff02::1`, because `::` is not a
+routable unicast reply target.
 
 The task requires a downstream link-local router address. If the address is not
 available, it waits and logs that state instead of inventing a router source.
@@ -301,9 +334,10 @@ When the committed client set is empty, the task suppresses current NAT66 RAs.
 If it had advertised the NAT66 prefix before the set became empty, it attempts a
 zero-lifetime withdrawal and waits for clients to reappear.
 
-On NAT66 stop, the runtime waits for the RA task and withdraws the current
-gateway prefix. During Clean or replacement cleanup, it may also withdraw older
-gateway prefixes recorded during config replacement.
+On NAT66 stop, the runtime waits for the RA task and attempts to withdraw the
+current gateway prefix through the session request connection. During Clean or
+replacement cleanup, it may also withdraw older gateway prefixes recorded during
+config replacement. Failure is reported without reconnecting.
 
 The RA task also watches existing downstream IPv6 prefixes. Non-NAT66 routable
 prefixes are temporarily advertised with zero lifetime so clients stop using
@@ -326,6 +360,17 @@ NAT66 startup is best effort across these pieces:
   without that MAC/protocol interception when other capabilities started.
 - RA task setup failure is nonfatal; existing NAT66 interception may continue,
   but clients may need other configuration to discover the gateway.
+- RA transmit `ENOBUFS` is downstream link backpressure, such as a full
+  USB/NCM tether transmit queue, and is logged to stderr instead of reported as
+  a structured nonfatal. Other RA send failures remain structured nonfatals
+  because they can indicate socket, privilege, or platform state problems.
+- Current or solicited RA send `EADDRNOTAVAIL` means the downstream link-local
+  router address disappeared between lookup and socket setup or transmission,
+  such as during tethering teardown. It is logged as a skipped advertisement
+  rather than reported as a structured nonfatal.
+- RA withdrawal socket bind `EADDRNOTAVAIL` means the downstream link-local
+  router address disappeared before cleanup could send a zero-lifetime RA. It
+  is logged as skipped cleanup rather than reported as a structured nonfatal.
 - ICMP registration failure is nonfatal; NAT66 continues without ICMP Echo
   interception. The known transparent raw IPv6 bind `EADDRNOTAVAIL` failure is
   reported only when `uname.release` parses as Linux 5.11.14 or newer.
@@ -346,13 +391,22 @@ replacement instead of being treated as failed.
 
 NAT66 cleanup has two layers:
 
-- session stop cancels runtime tasks and withdraws advertised prefixes;
+- session stop cancels runtime tasks and attempts to withdraw advertised
+  prefixes;
 - routing cleanup removes deterministic routes, addresses, rules, and firewall
   state.
 
 Per-MAC runtime removal cancels that MAC's TCP tasks, UDP associations, Echo
 allocations, and UDP error registrations, then preserves final source counters
 long enough for one structured traffic-counter read.
+
+Reply sockets are process-owned file descriptors rather than routing or
+firewall mutations. Session stop releases listener anchors and association
+leases. A retained listener swaps its anchor on the first DNS query for a new
+gateway after reconfiguration, while overlapping detached tasks keep their
+sockets live until they finish. The last lease closes each socket, and process
+death closes any remaining descriptors. Normal stop and Clean require no
+additional kernel-state cleanup for the reply socket pool.
 
 Do not add persisted NAT66 cleanup state. If state can leak after process death,
 Clean must be able to reconstruct and delete it from deterministic identifiers,

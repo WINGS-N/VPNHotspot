@@ -17,7 +17,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
 import androidx.annotation.StringRes
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,7 +33,6 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
-import androidx.compose.material3.scrollbar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.State
@@ -52,6 +50,11 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.error
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
@@ -83,12 +86,12 @@ import be.mygod.vpnhotspot.net.TetheringManagerCompat
 import be.mygod.vpnhotspot.net.wifi.WifiApManager
 import be.mygod.vpnhotspot.net.wifi.WifiP2pManagerHelper
 import be.mygod.vpnhotspot.root.WifiApCommands
-import be.mygod.vpnhotspot.ui.apconfiguration.VendorData
+import be.mygod.vpnhotspot.net.wifi.VendorData
 import be.mygod.vpnhotspot.ui.theme.VpnHotspotPreviewSurface
 import be.mygod.vpnhotspot.util.Services
 import be.mygod.vpnhotspot.util.readableMessage
+import be.mygod.vpnhotspot.widget.SmartSnackbar
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 import timber.log.Timber
@@ -107,7 +110,7 @@ data class TetheringServiceState(
 @Composable
 fun TetheringScreen(
     snackbarHostState: SnackbarHostState,
-    repeaterStatus: RepeaterService.Status?,
+    repeaterActive: Boolean?,
     repeaterGroup: WifiP2pGroup?,
     localOnlyIface: String?,
     tetherStates: TetherStates,
@@ -123,9 +126,7 @@ fun TetheringScreen(
 ) {
     val context = LocalContext.current
     val inspectionMode = LocalInspectionMode.current
-    val scope = rememberCoroutineScope()
     val linkStyles = rememberNetworkAddressLinkStyles()
-    val repeaterMissingLocationPermissions = stringResource(R.string.repeater_missing_location_permissions)
     val staticIpActive by StaticIpSetter.active.collectAsStateWithLifecycle()
     val staticIpAddresses by StaticIpSetter.addresses.collectAsStateWithLifecycle()
     val staticIpApplying by StaticIpSetter.applying.collectAsStateWithLifecycle()
@@ -220,9 +221,7 @@ fun TetheringScreen(
             onResult = { granted ->
                 if (granted) {
                     app.startServiceWithLocation<RepeaterService>(context)
-                } else scope.launch {
-                    snackbarHostState.showLongSnackbar(repeaterMissingLocationPermissions)
-                }
+                } else SmartSnackbar.make(R.string.repeater_missing_location_permissions).show()
             },
         )
         launcher::launch
@@ -237,8 +236,7 @@ fun TetheringScreen(
         launcher::launch
     }
     val showRepeater = inspectionMode || Services.p2p != null
-    val showRepeaterWps = (repeaterStatus == RepeaterService.Status.STARTING ||
-            repeaterStatus == RepeaterService.Status.ACTIVE) && WifiP2pManagerHelper.startWps != null
+    val showRepeaterWps = repeaterActive == true && WifiP2pManagerHelper.startWps != null
     val showBluetooth = inspectionMode || (context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH) &&
             bluetoothTethering != null)
     val bluetoothActive = remember(showBluetooth, bluetoothTethering, bluetoothVersion, tetherStates.tethered) {
@@ -257,24 +255,18 @@ fun TetheringScreen(
         SettingsList {
             preferenceGroup(key = "active_tethering") {
                 if (showRepeater) {
-                    val active = repeaterStatus == RepeaterService.Status.ACTIVE
-                    val switchEnabled = repeaterStatus == RepeaterService.Status.IDLE || active
+                    val active = repeaterActive == true
                     val toggleRepeater: () -> Unit = {
-                        when (repeaterStatus) {
-                            RepeaterService.Status.IDLE -> startRepeater(if (Build.VERSION.SDK_INT >= 33) {
-                                Manifest.permission.NEARBY_WIFI_DEVICES
-                            } else Manifest.permission.ACCESS_FINE_LOCATION)
-                            RepeaterService.Status.ACTIVE -> onStopRepeater()
-                            else -> { }
-                        }
+                        if (active) onStopRepeater() else startRepeater(if (Build.VERSION.SDK_INT >= 33) {
+                            Manifest.permission.NEARBY_WIFI_DEVICES
+                        } else Manifest.permission.ACCESS_FINE_LOCATION)
                     }
                     row(R.string.title_repeater) {
                         TetheringRow(
                             icon = R.drawable.ic_router,
                             title = stringResource(R.string.title_repeater),
                             summary = repeaterSummary(context, repeaterGroup, ifaceLookup, linkStyles),
-                            checked = repeaterStatus == RepeaterService.Status.STARTING || active,
-                            switchEnabled = switchEnabled,
+                            checked = active,
                             onClick = onConfigureRepeater,
                             onCheckedChange = toggleRepeater,
                         )
@@ -352,15 +344,10 @@ fun TetheringScreen(
                             )
                         }
                         if (vpnTethering || watch) row("watch_reconnect") {
-                            PreferenceRow(
+                            PreferenceSwitchRow(
                                 title = stringResource(R.string.tethering_watch_reconnect),
-                                trailing = {
-                                    PreferenceSwitch(
-                                        checked = watch,
-                                        onCheckedChange = null,
-                                    )
-                                },
-                                onClick = {
+                                checked = watch,
+                                onCheckedChange = {
                                     if (watch) context.startService(Intent(context, TetheringService::class.java)
                                         .putExtra(TetheringService.EXTRA_REMOVE_INTERFACE_MONITOR, iface))
                                     else context.startForegroundService(Intent(context, TetheringService::class.java)
@@ -446,11 +433,12 @@ fun TetheringScreen(
         } catch (e: InvocationTargetException) {
             e.readableMessage
         }
+        val staticIpTitle = stringResource(R.string.tethering_static_ip)
         AlertDialog(
             onDismissRequest = {
                 staticIpDraft = null
             },
-            title = { Text(stringResource(R.string.tethering_static_ip)) },
+            title = { Text(staticIpTitle) },
             text = {
                 val scrollState = rememberScrollState()
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -463,11 +451,8 @@ fun TetheringScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .focusRequester(focusRequester)
-                            .scrollbar(
-                                state = scrollState.scrollIndicatorState,
-                                orientation = Orientation.Vertical,
-                                isFadeEnabled = false,
-                            ),
+                            .nonInteractiveVerticalScrollbar(scrollState.scrollIndicatorState)
+                            .semantics { contentDescription = staticIpTitle },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                         lineLimits = TextFieldLineLimits.MultiLine(
                             minHeightInLines = 2,
@@ -482,6 +467,10 @@ fun TetheringScreen(
                                 Text(
                                     text = it,
                                     color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.semantics {
+                                        liveRegion = LiveRegionMode.Polite
+                                        error(it)
+                                    },
                                 )
                             }
                         },
@@ -510,16 +499,18 @@ fun TetheringScreen(
     }
     if (wpsDialog) {
         val focusRequester = rememberDialogFocusRequester()
+        val wpsTitle = stringResource(R.string.repeater_wps_dialog_title)
         AlertDialog(
             onDismissRequest = { wpsDialog = false },
-            title = { Text(stringResource(R.string.repeater_wps_dialog_title)) },
+            title = { Text(wpsTitle) },
             text = {
                 OutlinedTextField(
                     value = wpsPin,
                     onValueChange = { wpsPin = it },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .focusRequester(focusRequester),
+                        .focusRequester(focusRequester)
+                        .semantics { contentDescription = wpsTitle },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
                     shape = OutlinedTextFieldDefaults.roundedShape,
@@ -636,34 +627,42 @@ private fun TetheringRow(
     onClick: () -> Unit,
     onCheckedChange: (() -> Unit)? = null,
 ) {
-    PreferenceRow(
-        icon = icon,
-        title = title,
-        summaryContent = summary?.takeIf { it.text.isNotEmpty() }?.let {
-            {
-                RowSelectionContainer {
-                    Text(it)
-                }
+    val summaryContent: (@Composable () -> Unit)? = summary?.takeIf { it.text.isNotEmpty() }?.let {
+        {
+            RowSelectionContainer {
+                Text(it)
             }
-        },
-        enabled = enabled,
-        trailing = {
-            if (onCheckedChange == null) {
-                PreferenceSwitch(
-                    checked = checked,
-                    enabled = switchEnabled,
-                    onCheckedChange = null,
-                )
-            } else {
+        }
+    }
+    if (onCheckedChange == null) {
+        PreferenceSwitchRow(
+            icon = icon,
+            title = title,
+            summaryContent = summaryContent,
+            checked = checked,
+            enabled = enabled && switchEnabled,
+            onCheckedChange = { onClick() },
+        )
+    } else {
+        val (rowFocusModifier, switchFocusModifier) = rememberPreferenceSplitFocusModifiers()
+        PreferenceRow(
+            icon = icon,
+            title = title,
+            modifier = rowFocusModifier,
+            summaryContent = summaryContent,
+            enabled = enabled,
+            trailing = {
                 PreferenceSplitSwitch(
+                    label = title,
                     checked = checked,
+                    modifier = switchFocusModifier,
                     enabled = switchEnabled,
                     onCheckedChange = { onCheckedChange() },
                 )
-            }
-        },
-        onClick = onClick,
-    )
+            },
+            onClick = onClick,
+        )
+    }
 }
 
 @Preview(name = "Tethering", showBackground = true, widthDp = 420, heightDp = 720)
@@ -679,7 +678,7 @@ private fun TetheringPreview() {
     VpnHotspotPreviewSurface {
         TetheringScreen(
             snackbarHostState = remember { SnackbarHostState() },
-            repeaterStatus = null,
+            repeaterActive = true,
             repeaterGroup = null,
             localOnlyIface = null,
             tetherStates = TetherStates(),
@@ -769,7 +768,10 @@ private fun rememberWifiSummary(
             )
         }
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
-            WifiApCommands.softApCallbackFlow(expensive = true).catch { e -> Timber.w(e) }.collect { event ->
+            WifiApCommands.softApCallbackFlow(expensive = true).catch { e ->
+                if (e is CancellationException) throw e
+                Timber.w(e)
+            }.collect { event ->
                 when (event) {
                     is WifiApManager.Event.OnStateChanged -> {
                         if (!WifiApManager.checkWifiApState(event.state)) return@collect
@@ -913,6 +915,12 @@ private fun repeaterSummary(
             if (data.isNotEmpty()) {
                 if (length > 0) append('\n')
                 append(context.getString(R.string.tethering_manage_wifi_vendor_data, data))
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 37) group.wifiP2pGroupClientConnectionInfo?.let { info ->
+            wifiP2pConnectionInfoLabel(context, info)?.let {
+                if (length > 0) append('\n')
+                append(it)
             }
         }
     }

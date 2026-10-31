@@ -1,10 +1,13 @@
 import groovy.json.JsonOutput
 import org.gradle.api.DefaultTask
 import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputDirectory
+import org.gradle.api.tasks.InputFile
 import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
@@ -129,6 +132,91 @@ abstract class BuildDaemonNativeLibsTask : DefaultTask() {
     }
 }
 
+abstract class GenerateSupplicantAidlJavaTask : DefaultTask() {
+    @get:Input
+    abstract val minSdkVersion: Property<Int>
+
+    @get:InputDirectory
+    @get:Optional
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val supplicantAidlDir: DirectoryProperty
+
+    @get:InputDirectory
+    @get:Optional
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val commonAidlDir: DirectoryProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val aidlExecutable: RegularFileProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val frameworkAidl: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        val sourceDirs = listOf(supplicantAidlDir.get().asFile, commonAidlDir.get().asFile)
+        for (sourceDir in sourceDirs) check(sourceDir.isDirectory) {
+            "Missing AOSP hardware/interfaces submodule source directory: ${sourceDir.absolutePath}. " +
+                "Run `git submodule update --init external/aosp/hardware/interfaces`."
+        }
+        val outputDir = outputDir.get().asFile.apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val aidlFiles = sourceDirs.asSequence().flatMap { sourceDir ->
+            sourceDir.walkTopDown().filter { it.isFile && it.extension == "aidl" }
+        }.sortedBy { it.path }.toList()
+        val process = ProcessBuilder(
+            buildList {
+                add(aidlExecutable.get().asFile.absolutePath)
+                add("--lang=java")
+                add("--structured")
+                add("--stability=vintf")
+                add("--version=5")
+                add("--min_sdk_version=${minSdkVersion.get()}")
+                add("-p")
+                add(frameworkAidl.get().asFile.absolutePath)
+                for (sourceDir in sourceDirs) {
+                    add("-I")
+                    add(sourceDir.absolutePath)
+                }
+                add("-o")
+                add(outputDir.absolutePath)
+                addAll(aidlFiles.map { it.absolutePath })
+            },
+        ).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader().readText()
+        check(process.waitFor() == 0) { "aidl failed\n$output" }
+        var strippedVintfStabilityCalls = 0
+        var rewrittenParcelableStabilityMethods = 0
+        val markVintfStabilityCall = "      this.markVintfStability();\n"
+        val parcelableStabilityMethod = Regex(
+            "  @Override\n[ \\t]+public final int getStability\\(\\) \\{ " +
+                "return android\\.os\\.Parcelable\\.PARCELABLE_STABILITY_VINTF; }\n")
+        // AOSP Parcelable.PARCELABLE_STABILITY_VINTF is 1; keep the generated method without linking
+        // against the hidden SDK constant on the app compile classpath.
+        val rewrittenParcelableStabilityMethod = "  public final int getStability() { return 1; }\n"
+        for (file in outputDir.walkTopDown().filter { it.isFile && it.extension == "java" }) {
+            val source = file.readText()
+            strippedVintfStabilityCalls += source.split(markVintfStabilityCall).size - 1
+            rewrittenParcelableStabilityMethods += parcelableStabilityMethod.findAll(source).count()
+            val next = source
+                .replace(markVintfStabilityCall, "")
+                .let { parcelableStabilityMethod.replace(it, rewrittenParcelableStabilityMethod) }
+            if (source != next) file.writeText(next)
+        }
+        check(strippedVintfStabilityCalls > 0) { "Generated AIDL Java did not contain markVintfStability calls." }
+        check(rewrittenParcelableStabilityMethods > 0) {
+            "Generated AIDL Java did not contain Parcelable VINTF stability methods."
+        }
+    }
+}
+
 val javaVersion = 11
 android {
     namespace = "be.mygod.vpnhotspot"
@@ -141,9 +229,9 @@ android {
     defaultConfig {
         applicationId = "be.mygod.vpnhotspot"
         minSdk = 29
-        targetSdk = 36
-        versionCode = 2007
-        versionName = "3.0.4"
+        targetSdk = 37
+        versionCode = 2011
+        versionName = "3.0.8"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     splits {
@@ -178,8 +266,8 @@ android {
     lint.warning += "UnsafeOptInUsageError"
     sourceSets.getByName("androidTest").assets.directories.add("$projectDir/schemas")
 }
-val hiddenApiStubAnnotations by configurations.creating
-val compileHiddenApiStubs by tasks.registering(JavaCompile::class) {
+val hiddenApiStubAnnotations = configurations.create("hiddenApiStubAnnotations")
+val compileHiddenApiStubs = tasks.register<JavaCompile>("compileHiddenApiStubs") {
     source("src/hiddenApiStubs/java")
     classpath = files(androidComponents.sdkComponents.bootClasspath) + hiddenApiStubAnnotations
     destinationDirectory.set(layout.buildDirectory.dir("intermediates/hiddenApiStubs/classes"))
@@ -189,7 +277,7 @@ val compileHiddenApiStubs by tasks.registering(JavaCompile::class) {
 }
 val hiddenApiStubsClasses = files(compileHiddenApiStubs.flatMap { it.destinationDirectory })
     .builtBy(compileHiddenApiStubs)
-val hiddenApiStubsJar by tasks.registering(Jar::class) {
+val hiddenApiStubsJar = tasks.register<Jar>("hiddenApiStubsJar") {
     from(hiddenApiStubsClasses)
     archiveFileName.set("hidden-api-stubs.jar")
 }
@@ -208,6 +296,21 @@ androidComponents.onVariants { variant ->
         outputs.upToDateWhen { false }
     }
     variant.sources.java?.addGeneratedSourceDirectory(task, GenerateGitJavaTask::outputDir)
+    val supplicantAidlTask = tasks.register<GenerateSupplicantAidlJavaTask>("generate${variantTitle}SupplicantAidlJava") {
+        minSdkVersion.set(android.defaultConfig.minSdk!!)
+        supplicantAidlDir.set(
+            rootProject.layout.projectDirectory.dir(
+                "external/aosp/hardware/interfaces/wifi/supplicant/aidl/aidl_api/" +
+                    "android.hardware.wifi.supplicant/5"))
+        commonAidlDir.set(
+            rootProject.layout.projectDirectory.dir(
+                "external/aosp/hardware/interfaces/wifi/common/aidl/aidl_api/" +
+                    "android.hardware.wifi.common/2"))
+        aidlExecutable.set(androidComponents.sdkComponents.aidl.flatMap { it.executable })
+        frameworkAidl.set(androidComponents.sdkComponents.aidl.flatMap { it.framework })
+        outputDir.set(layout.buildDirectory.dir("generated/source/supplicantAidl/${variant.name}"))
+    }
+    variant.sources.java?.addGeneratedSourceDirectory(supplicantAidlTask, GenerateSupplicantAidlJavaTask::outputDir)
     val daemonTask = tasks.register<BuildDaemonNativeLibsTask>(
         "build${variantTitle}DaemonNativeLibs") {
         sourceDir.set(layout.projectDirectory.dir("src/main/rust/vpnhotspotd"))

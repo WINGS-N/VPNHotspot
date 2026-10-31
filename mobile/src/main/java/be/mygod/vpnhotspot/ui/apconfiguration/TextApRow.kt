@@ -2,7 +2,6 @@ package be.mygod.vpnhotspot.ui.apconfiguration
 
 import androidx.annotation.DrawableRes
 import androidx.annotation.StringRes
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,7 +16,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.scrollbar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,6 +24,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -33,6 +33,7 @@ import be.mygod.vpnhotspot.R
 import be.mygod.vpnhotspot.ui.DialogConfirmButton
 import be.mygod.vpnhotspot.ui.DialogDismissButton
 import be.mygod.vpnhotspot.ui.PreferenceRow
+import be.mygod.vpnhotspot.ui.nonInteractiveVerticalScrollbar
 import be.mygod.vpnhotspot.ui.rememberDialogFocusRequester
 
 @Composable
@@ -54,15 +55,16 @@ fun TextApRow(
     }
     val text = draft.text.toString()
     val error = validator(text)
+    val titleText = stringResource(title)
     PreferenceRow(
         icon = icon,
-        title = stringResource(title),
+        title = titleText,
         summary = value,
         onClick = { editing = true },
     )
     if (editing) AlertDialog(
         onDismissRequest = { editing = false },
-        title = { Text(stringResource(title)) },
+        title = { Text(titleText) },
         text = {
             val focusRequester = rememberDialogFocusRequester()
             val multiline = minLines > 1
@@ -79,13 +81,10 @@ fun TextApRow(
                         .focusRequester(focusRequester)
                         .then(
                             if (multiline) {
-                                Modifier.scrollbar(
-                                    state = scrollState.scrollIndicatorState,
-                                    orientation = Orientation.Vertical,
-                                    isFadeEnabled = false,
-                                )
+                                Modifier.nonInteractiveVerticalScrollbar(scrollState.scrollIndicatorState)
                             } else Modifier
-                        ),
+                        )
+                        .semantics { contentDescription = titleText },
                     inputTransformation = maxLength?.let { InputTransformation.maxLength(it) },
                     keyboardOptions = keyboardOptions,
                     lineLimits = if (multiline) TextFieldLineLimits.MultiLine(

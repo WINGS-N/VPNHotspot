@@ -2,6 +2,7 @@ package be.mygod.vpnhotspot.ui
 
 import androidx.annotation.DrawableRes
 import androidx.annotation.StringRes
+import androidx.compose.foundation.ScrollIndicatorState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -47,8 +48,8 @@ import androidx.compose.material3.TooltipAnchorPosition
 import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.TooltipDefaults
 import androidx.compose.material3.VerticalDivider
+import androidx.compose.material3.nonInteractiveScrollbar
 import androidx.compose.material3.rememberTooltipState
-import androidx.compose.material3.scrollbar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -61,18 +62,29 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.fromHtml
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import be.mygod.vpnhotspot.R
 
@@ -98,6 +110,14 @@ fun rememberDialogFocusRequester(enabled: Boolean = true): FocusRequester {
 }
 
 @Composable
+fun Modifier.nonInteractiveVerticalScrollbar(state: ScrollIndicatorState?) = state?.let {
+    nonInteractiveScrollbar(
+        state = it,
+        orientation = Orientation.Vertical,
+    )
+} ?: this
+
+@Composable
 fun SettingsList(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(vertical = 8.dp),
@@ -108,11 +128,7 @@ fun SettingsList(
         state = state,
         modifier = modifier
             .fillMaxSize()
-            .scrollbar(
-                state = state.scrollIndicatorState,
-                orientation = Orientation.Vertical,
-                isFadeEnabled = false,
-            ),
+            .nonInteractiveVerticalScrollbar(state.scrollIndicatorState),
         contentPadding = contentPadding,
         content = content,
     )
@@ -230,28 +246,106 @@ fun PreferenceRow(
     onClick: (() -> Unit)? = null,
 ) {
     val position = LocalPreferenceRowPosition.current
+    if (onClick == null) {
+        SegmentedListItem(
+            shapes = preferenceRowShapes(position),
+            modifier = modifier.fillMaxWidth(),
+            enabled = enabled,
+            leadingContent = iconContent,
+            trailingContent = trailing,
+            supportingContent = summaryContent ?: summary?.takeIf { it.isNotEmpty() }?.let { { Text(it) } },
+            verticalAlignment = Alignment.CenterVertically,
+            colors = preferenceRowColors(position),
+            content = titleContent,
+        )
+    } else {
+        SegmentedListItem(
+            onClick = onClick,
+            shapes = preferenceRowShapes(position),
+            modifier = modifier.fillMaxWidth(),
+            enabled = enabled,
+            leadingContent = iconContent,
+            trailingContent = trailing,
+            supportingContent = summaryContent ?: summary?.takeIf { it.isNotEmpty() }?.let { { Text(it) } },
+            verticalAlignment = Alignment.CenterVertically,
+            colors = preferenceRowColors(position),
+            content = titleContent,
+        )
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+fun PreferenceRadioRow(
+    selected: Boolean,
+    titleContent: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    summaryContent: (@Composable () -> Unit)? = null,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    val position = LocalPreferenceRowPosition.current
     SegmentedListItem(
-        selected = false,
-        onClick = onClick ?: {},
-        shapes = when {
-            position == null -> ListItemDefaults.shapes()
-            position.count == 1 -> ListItemDefaults.shapes(shape = MaterialTheme.shapes.large)
-            else -> ListItemDefaults.segmentedShapes(position.index, position.count)
-        },
+        selected = selected,
+        onClick = onClick,
+        shapes = preferenceRowShapes(position),
         modifier = modifier.fillMaxWidth(),
         enabled = enabled,
-        leadingContent = iconContent,
-        trailingContent = trailing,
-        supportingContent = summaryContent ?: summary?.takeIf { it.isNotEmpty() }?.let { { Text(it) } },
+        leadingContent = { RadioButton(selected = selected, onClick = null) },
+        supportingContent = summaryContent,
         verticalAlignment = Alignment.CenterVertically,
-        colors = if (position == null) {
-            ListItemDefaults.colors()
-        } else {
-            ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
-        },
+        colors = preferenceRowColors(position),
     ) {
         titleContent()
     }
+}
+
+@Composable
+fun PreferenceSwitchRow(
+    checked: Boolean,
+    @DrawableRes icon: Int? = null,
+    title: String,
+    modifier: Modifier = Modifier,
+    summary: String? = null,
+    summaryContent: (@Composable () -> Unit)? = null,
+    enabled: Boolean = true,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    PreferenceRow(
+        icon = icon,
+        title = title,
+        modifier = modifier.semantics(mergeDescendants = true) {
+            toggleableState = ToggleableState(checked)
+            role = Role.Switch
+        },
+        summary = summary,
+        summaryContent = summaryContent,
+        enabled = enabled,
+        trailing = {
+            PreferenceSwitch(
+                checked = checked,
+                modifier = Modifier.clearAndSetSemantics { },
+                enabled = enabled,
+                onCheckedChange = null,
+            )
+        },
+        onClick = { if (enabled) onCheckedChange(!checked) },
+    )
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private fun preferenceRowShapes(position: PreferenceRowPosition?) = when {
+    position == null -> ListItemDefaults.shapes()
+    else -> ListItemDefaults.segmentedShapes(position.index, position.count)
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+private fun preferenceRowColors(position: PreferenceRowPosition?) = if (position == null) {
+    ListItemDefaults.colors()
+} else {
+    ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
 }
 
 private class PreferenceRowPosition(val index: Int, val count: Int)
@@ -284,7 +378,9 @@ fun PreferenceSwitch(
 
 @Composable
 fun PreferenceSplitSwitch(
+    label: String,
     checked: Boolean,
+    modifier: Modifier = Modifier,
     enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
 ) {
@@ -302,7 +398,7 @@ fun PreferenceSplitSwitch(
         )
         Spacer(Modifier.width(12.dp))
         Box(
-            modifier = Modifier
+            modifier = modifier
                 .width(PreferenceSplitControlWidth)
                 .height(48.dp)
                 .toggleable(
@@ -312,7 +408,18 @@ fun PreferenceSplitSwitch(
                     enabled = enabled,
                     role = Role.Switch,
                     onValueChange = onCheckedChange,
-                ),
+                )
+                .clearAndSetSemantics {
+                    contentDescription = label
+                    toggleableState = ToggleableState(checked)
+                    role = Role.Switch
+                    if (enabled) {
+                        onClick {
+                            onCheckedChange(!checked)
+                            true
+                        }
+                    } else disabled()
+                },
             contentAlignment = Alignment.Center,
         ) {
             PreferenceSwitch(
@@ -323,6 +430,25 @@ fun PreferenceSplitSwitch(
                 interactionSource = interactionSource,
             )
         }
+    }
+}
+
+@Composable
+fun rememberPreferenceSplitFocusModifiers(): Pair<Modifier, Modifier> {
+    val rowRequester = remember { FocusRequester() }
+    val controlRequester = remember { FocusRequester() }
+    return if (LocalLayoutDirection.current == LayoutDirection.Rtl) {
+        Modifier
+            .focusRequester(rowRequester)
+            .focusProperties { left = controlRequester } to Modifier
+            .focusRequester(controlRequester)
+            .focusProperties { right = rowRequester }
+    } else {
+        Modifier
+            .focusRequester(rowRequester)
+            .focusProperties { right = controlRequester } to Modifier
+            .focusRequester(controlRequester)
+            .focusProperties { left = rowRequester }
     }
 }
 
@@ -370,11 +496,7 @@ fun PreferenceSelectionSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f, fill = false)
-                .scrollbar(
-                    state = state.scrollIndicatorState,
-                    orientation = Orientation.Vertical,
-                    isFadeEnabled = false,
-                ),
+                .nonInteractiveVerticalScrollbar(state.scrollIndicatorState),
             contentPadding = modalBottomSheetListContentPadding(),
             verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap),
         ) {
@@ -413,10 +535,10 @@ fun PreferenceSelectionRow(
     onClick: () -> Unit,
 ) {
     CompositionLocalProvider(LocalPreferenceRowPosition provides PreferenceRowPosition(index, count)) {
-        PreferenceRow(
+        PreferenceRadioRow(
+            selected = selected,
             titleContent = { Text(title) },
             summaryContent = summary?.let { { Text(it) } },
-            iconContent = { RadioButton(selected = selected, onClick = null) },
             onClick = onClick,
         )
     }

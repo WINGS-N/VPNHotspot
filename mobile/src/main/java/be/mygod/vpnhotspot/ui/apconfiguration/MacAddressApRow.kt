@@ -1,7 +1,6 @@
 package be.mygod.vpnhotspot.ui.apconfiguration
 
 import android.os.Build
-import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,9 +10,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.scrollbar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -31,8 +28,10 @@ import be.mygod.vpnhotspot.net.wifi.SoftApConfigurationCompat
 import be.mygod.vpnhotspot.ui.DialogConfirmButton
 import be.mygod.vpnhotspot.ui.DialogDismissButton
 import be.mygod.vpnhotspot.ui.PreferenceGroup
+import be.mygod.vpnhotspot.ui.PreferenceRadioRow
 import be.mygod.vpnhotspot.ui.PreferenceRow
 import be.mygod.vpnhotspot.ui.annotatedStringResource
+import be.mygod.vpnhotspot.ui.nonInteractiveVerticalScrollbar
 import be.mygod.vpnhotspot.ui.rememberDialogFocusRequester
 import be.mygod.vpnhotspot.ui.rememberTextFieldValueAtEnd
 
@@ -106,11 +105,7 @@ private fun MacAddressApDialog(
             }
             Column(
                 modifier = Modifier
-                    .scrollbar(
-                        state = scrollState.scrollIndicatorState,
-                        orientation = Orientation.Vertical,
-                        isFadeEnabled = false,
-                    )
+                    .nonInteractiveVerticalScrollbar(scrollState.scrollIndicatorState)
                     .verticalScroll(scrollState),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
@@ -121,7 +116,28 @@ private fun MacAddressApDialog(
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 if (state.p2pMode) {
-                    bssidField()
+                    PreferenceGroup(horizontalPadding = 0.dp) {
+                        row(SoftApConfigurationCompat.RANDOMIZATION_NONE) {
+                            MacRandomizationOptionRow(
+                                selected = draftRandomization == SoftApConfigurationCompat.RANDOMIZATION_NONE,
+                                title = stringResource(R.string.wifi_mac_randomization_none),
+                                description = annotatedStringResource(R.string.wifi_mac_randomization_none_help),
+                                onSelect = { draftRandomization = SoftApConfigurationCompat.RANDOMIZATION_NONE },
+                            )
+                        }
+                        row(SoftApConfigurationCompat.RANDOMIZATION_NON_PERSISTENT) {
+                            MacRandomizationOptionRow(
+                                selected = draftRandomization ==
+                                        SoftApConfigurationCompat.RANDOMIZATION_NON_PERSISTENT,
+                                title = stringResource(R.string.wifi_mac_randomization_non_persistent),
+                                description = annotatedStringResource(
+                                    R.string.wifi_mac_randomization_non_persistent_help),
+                                onSelect = {
+                                    draftRandomization = SoftApConfigurationCompat.RANDOMIZATION_NON_PERSISTENT
+                                },
+                            )
+                        }
+                    }
                 } else {
                     PreferenceGroup(horizontalPadding = 0.dp) {
                         row(SoftApConfigurationCompat.RANDOMIZATION_NONE) {
@@ -188,7 +204,7 @@ private fun MacAddressApDialog(
                 enabled = bssidError == null && persistentRandomizedMacError == null,
                 onClick = {
                     state.macRandomization = draftRandomization
-                    state.bssid = draftBssid.text
+                    state.bssid = if (state.p2pMode) "" else draftBssid.text
                     if (persistentRandomizedMacVisible) {
                         state.persistentRandomizedMac = draftPersistentRandomizedMac.text
                     }
@@ -215,22 +231,23 @@ private fun MacRandomizationOptionRow(
     onSelect: () -> Unit,
     content: @Composable (() -> Unit)? = null,
 ) {
-    PreferenceRow(
-        titleContent = { Text(title) },
-        summaryContent = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(description)
-                content?.invoke()
-            }
-        },
-        iconContent = if (showRadio) {
-            {
-                RadioButton(
-                    selected = selected,
-                    onClick = null,
-                )
-            }
-        } else null,
-        onClick = if (showRadio) onSelect else null,
-    )
+    val summaryContent: @Composable () -> Unit = {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(description)
+            content?.invoke()
+        }
+    }
+    if (showRadio) {
+        PreferenceRadioRow(
+            selected = selected,
+            titleContent = { Text(title) },
+            summaryContent = summaryContent,
+            onClick = onSelect,
+        )
+    } else {
+        PreferenceRow(
+            titleContent = { Text(title) },
+            summaryContent = summaryContent,
+        )
+    }
 }
